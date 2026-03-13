@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  MUTEq static dashboard — S3 website, CloudFront HTTPS, ACM certificate, Route53 A record.
+  Deploy this stack in us-east-1 (required for CloudFront ACM certificates).
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+Parameters:
+
+  DomainName:
+    Type: String
+    Default: www.hoongram.com
+    Description: Public hostname for the dashboard (must be in the Route53 hosted zone)
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route53 hosted zone ID for hoongram.com (must already exist)
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── S3 bucket ──────────────────────────────────────────────────────────────
+  DashboardBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DomainName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      Tags:
+        - Key: Name
+          Value: muteq-dashboard
+
+  # Public read — required for S3 website endpoint used as CloudFront origin
+  DashboardBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DashboardBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${DomainName}/*'
+
+  # ── ACM certificate ────────────────────────────────────────────────────────
+  # NOTE: Stack must be deployed in us-east-1; CloudFront requires ACM certs
+  # to be in that region regardless of where your other resources live.
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  # ── CloudFront distribution ────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    DependsOn: DashboardBucket
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        # PriceClass_100 = US + Europe edge nodes only (lowest cost)
+        PriceClass: PriceClass_100
+        Aliases:
+          - !Ref DomainName
+        Origins:
+          - Id: S3WebsiteOrigin
+            # Use the S3 website endpoint (not REST) so index.html redirect works.
+            # This endpoint is HTTP-only — CloudFront handles the HTTPS termination.
+            DomainName: !Sub '${DomainName}.s3-website-us-east-1.amazonaws.com'
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+        DefaultCacheBehavior:
+          TargetOriginId: S3WebsiteOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # CachingDisabled managed policy — CloudFront always fetches from S3.
+          # Correct here because the Pi uploads fresh HTML every ~60s.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+        ViewerCertificate:
+          AcmCertificateArn: !Ref Certificate
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Comment: MUTEq static dashboard
+
+  # ── Route53 A alias record ─────────────────────────────────────────────────
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub '${DomainName}.'
+      Type: A
+      AliasTarget:
+        # CloudFront's fixed hosted zone ID (constant across all distributions)
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        EvaluateTargetHealth: false
+
+# ── Outputs ───────────────────────────────────────────────────────────────────
+Outputs:
+
+  BucketName:
+    Description: S3 bucket name — set s3_bucket to this in client_config.json
+    Value: !Ref DashboardBucket
+
+  CloudFrontDomain:
+    Description: CloudFront domain (use for testing before DNS propagates)
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID (for manual cache invalidation if needed)
+    Value: !Ref CloudFrontDistribution
+
+  DashboardURL:
+    Description: Public dashboard URL
+    Value: !Sub 'https://${DomainName}'

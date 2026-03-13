@@ -1,0 +1,30 @@
+{
+  "config_version": 3,
+  "device_name": "My MUTEq Sensor",
+  "local_device_id": null,
+  "location": {
+    "address": "",
+    "lat": null,
+    "lon": null,
+    "country": ""
+  },
+  "environment_profile": "traffic_roadside",
+  "custom_environment_label": "",
+  "db_path": "/var/lib/muteq-sensor/muteq.db",
+  "publish_interval_seconds": 300,
+  "s3_bucket": "www.hoongram.com",
+  "aws_region": "us-east-1",
+  "aws_access_key_id": null,
+  "aws_secret_access_key": null,
+  "usb_override": {
+    "vendor_id": "0x1a86",
+    "product_id": "0x7523"
+  },
+  "mqtt_enabled": false,
+  "mqtt_server": "",
+  "mqtt_port": 1883,
+  "mqtt_user": "",
+  "mqtt_pass": "",
+  "mqtt_tls": false,
+  "log_level": "INFO"
+}
