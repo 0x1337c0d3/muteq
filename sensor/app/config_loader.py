@@ -16,6 +16,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "aws_region": "us-east-1",
     "aws_access_key_id": None,
     "aws_secret_access_key": None,
+    "cloudfront_distribution_id": None,
     "usb_override": {"vendor_id": None, "product_id": None},
     "mqtt_enabled": False,
     "mqtt_server": "",

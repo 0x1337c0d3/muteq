@@ -18,7 +18,7 @@ from .s3_uploader import upload_dashboard
 from .usb_reader import find_usb_device, read_spl_value
 
 CLIENT_VERSION = "0.1.0"
-TIME_WINDOW_SECONDS = 0.5
+TIME_WINDOW_SECONDS = 0.1
 MINIMUM_NOISE_LEVEL = 80.0
 
 
@@ -123,6 +123,7 @@ class MuteqClientApp:
             aws_region=self.cfg.get("aws_region", "us-east-1"),
             aws_access_key_id=self.cfg.get("aws_access_key_id") or None,
             aws_secret_access_key=self.cfg.get("aws_secret_access_key") or None,
+            cloudfront_distribution_id=self.cfg.get("cloudfront_distribution_id") or None,
             logger=self.logger,
         )
         if success:
