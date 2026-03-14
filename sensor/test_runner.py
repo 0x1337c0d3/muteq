@@ -33,7 +33,7 @@ from app.db import init_db, prune_old_data, write_event, write_reading
 from app.html_generator import generate_html
 from app.s3_uploader import upload_dashboard
 
-MINIMUM_NOISE_LEVEL = 80.0
+MINIMUM_NOISE_LEVEL = 70.0
 TIME_WINDOW_SECONDS = 2.0
 
 DEVICE_NAME: str = os.environ.get("DEVICE_NAME", "Test Sensor")

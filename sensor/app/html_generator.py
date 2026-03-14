@@ -19,7 +19,7 @@ TIMEFRAME_LIMIT: dict[str, int] = {
     "1m": 1440,
 }
 DOWNSAMPLE_TARGET = 600
-MINIMUM_NOISE_LEVEL = 80.0
+MINIMUM_NOISE_LEVEL = 70.0
 
 
 def generate_html(
@@ -142,7 +142,7 @@ def _level_class(value: float | None) -> str:
         return ""
     if value >= 90:
         return "alert"
-    if value >= 80:
+    if value >= 70:
         return "warn"
     return "ok"
 
@@ -221,7 +221,7 @@ def _render_html(
     <div class="card">
       <div class="label">Events (1h)</div>
       <div class="value" id="event-count">{event_count_1h}</div>
-      <div class="unit">\u226580 dB</div>
+      <div class="unit">\u226570 dB</div>
     </div>
     <div class="card">
       <div class="label">p90 (1h)</div>
@@ -261,7 +261,7 @@ def _render_html(
   <div class="panel">
     <div class="panel-header"><h2>Daily Statistics (last 30 days)</h2></div>
     <table>
-      <thead><tr><th>Date</th><th>Avg (dB)</th><th>Peak (dB)</th><th>Events (\u226580 dB)</th></tr></thead>
+      <thead><tr><th>Date</th><th>Avg (dB)</th><th>Peak (dB)</th><th>Events (\u226570 dB)</th></tr></thead>
       <tbody id="daily-tbody">
         {daily_rows_html if daily_rows_html else '<tr><td colspan="4">No data yet.</td></tr>'}
       </tbody>
@@ -292,7 +292,7 @@ def _render_html(
   // ── Colour helpers ────────────────────────────────────────────────────────
   function splColor(v) {{
     if (v >= 90) return '#f87171';
-    if (v >= 80) return '#facc15';
+    if (v >= 70) return '#facc15';
     return '#4ade80';
   }}
 

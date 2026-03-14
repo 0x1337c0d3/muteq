@@ -19,7 +19,7 @@ from .usb_reader import find_usb_device, read_spl_value
 
 CLIENT_VERSION = "0.1.0"
 TIME_WINDOW_SECONDS = 0.1
-MINIMUM_NOISE_LEVEL = 80.0
+MINIMUM_NOISE_LEVEL = 70.0
 
 
 def setup_logging(level: str) -> logging.Logger:
