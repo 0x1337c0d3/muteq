@@ -29,7 +29,7 @@ make aws-delete                       # tear down stack (prompts for confirmatio
 
 ### Data Flow
 1. Sensor reads USB SPL meter every 0.1s, batches into 0.5-second windows
-2. Every 0.5 seconds: writes a row to local SQLite (`readings` table); if peak ≥ 80 dB also writes to `events` table
+2. Every 0.5 seconds: writes a row to local SQLite (`readings` table); if peak ≥ 70 dB also writes to `events` table
 3. Every 60 seconds (`publish_interval_seconds`): queries SQLite, generates a self-contained static HTML dashboard, uploads it as `index.html` to the configured S3 bucket
 4. Browsers visit `https://www.hoongram.com` (CloudFront → S3); page auto-refreshes every 60s via `<meta http-equiv="refresh">`
 
@@ -44,7 +44,7 @@ make aws-delete                       # tear down stack (prompts for confirmatio
 
 ### SQLite Schema (local, on Pi)
 - `readings(id, timestamp TEXT, noise_value REAL, peak_value REAL)` — one row every 0.5s; pruned to 35 days
-- `events(id, timestamp TEXT, noise_value REAL, peak_value REAL)` — threshold breaches ≥ 80 dB
+- `events(id, timestamp TEXT, noise_value REAL, peak_value REAL)` — threshold breaches ≥ 70 dB
 
 ### AWS Infrastructure (`cloudformation.yml`)
 Deploy to **us-east-1** (required for CloudFront ACM certs):
@@ -53,12 +53,22 @@ Deploy to **us-east-1** (required for CloudFront ACM certs):
 - CloudFront distribution with `CachingDisabled` managed policy + HTTPS redirect
 - Route53 A alias record → CloudFront
 
-### Deployment (Pi)
+### Deployment (Pi — first time)
 ```bash
 ./sensor/install.sh          # installs venv, udev rules, systemd service
 # then edit /var/lib/muteq-sensor/config_client.json:
 #   s3_bucket, aws_access_key_id, aws_secret_access_key (or use ~/.aws/credentials)
 sudo systemctl restart muteq-sensor
+```
+
+### Updating the Pi
+```bash
+cd ~/muteq                        # or wherever the repo is cloned
+git pull
+sudo systemctl restart muteq-sensor
+
+# Verify it came up cleanly:
+journalctl -u muteq-sensor -n 100 -f
 ```
 
 The Pi IAM user only needs: `s3:PutObject` on `arn:aws:s3:::www.hoongram.com/index.html`
