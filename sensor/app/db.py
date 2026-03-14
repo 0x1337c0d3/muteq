@@ -88,6 +88,45 @@ def query_events(db_path: str, since_iso: str, limit: int) -> List[Dict[str, Any
         conn.close()
 
 
+def query_hourly_event_counts(db_path: str, since_iso: str) -> list[dict]:
+    """Return event counts grouped by hour-of-day (0-23) since `since_iso`."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hour, COUNT(*) AS count "
+            "FROM events WHERE timestamp >= ? GROUP BY hour ORDER BY hour",
+            (since_iso,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def query_daily_stats(db_path: str, since_iso: str) -> list[dict]:
+    """Return per-day avg/peak from readings and event count, newest first."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT date(timestamp) AS day, "
+            "  ROUND(AVG(noise_value), 1) AS avg_noise, "
+            "  ROUND(MAX(noise_value), 1) AS peak_noise "
+            "FROM readings WHERE timestamp >= ? GROUP BY day ORDER BY day DESC LIMIT 30",
+            (since_iso,),
+        ).fetchall()
+        stats = [dict(r) for r in rows]
+        event_rows = conn.execute(
+            "SELECT date(timestamp) AS day, COUNT(*) AS event_count "
+            "FROM events WHERE timestamp >= ? GROUP BY day",
+            (since_iso,),
+        ).fetchall()
+        event_map = {r["day"]: r["event_count"] for r in event_rows}
+        for s in stats:
+            s["event_count"] = event_map.get(s["day"], 0)
+        return stats
+    finally:
+        conn.close()
+
+
 def prune_old_data(db_path: str, retain_days: int = 35) -> None:
     """Delete readings and events older than `retain_days` days."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retain_days)).isoformat()
