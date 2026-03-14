@@ -75,7 +75,7 @@ def _query_events_for_tf(db_path: str, tf: str) -> list[dict[str, Any]]:
     for r in rows:
         try:
             ts = datetime.fromisoformat(r["timestamp"])
-            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+            ts_str = ts.astimezone().strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
             ts_str = r["timestamp"]
         result.append(
@@ -274,7 +274,7 @@ def _render_html(
       <h2 id="events-title">Threshold Breach Events \u2014 last 10 min</h2>
     </div>
     <table>
-      <thead><tr><th>Time (UTC)</th><th>Noise (dB)</th><th>Peak (dB)</th></tr></thead>
+      <thead><tr><th>Time (local)</th><th>Noise (dB)</th><th>Peak (dB)</th></tr></thead>
       <tbody id="events-tbody">
         {event_rows_html if event_rows_html else '<tr><td colspan="3">No events recorded yet.</td></tr>'}
       </tbody>

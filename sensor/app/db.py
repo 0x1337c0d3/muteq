@@ -93,7 +93,7 @@ def query_hourly_event_counts(db_path: str, since_iso: str) -> list[dict]:
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT CAST(strftime('%H', timestamp) AS INTEGER) AS hour, COUNT(*) AS count "
+            "SELECT CAST(strftime('%H', timestamp, 'localtime') AS INTEGER) AS hour, COUNT(*) AS count "
             "FROM events WHERE timestamp >= ? GROUP BY hour ORDER BY hour",
             (since_iso,),
         ).fetchall()
@@ -107,7 +107,7 @@ def query_daily_stats(db_path: str, since_iso: str) -> list[dict]:
     conn = _connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT date(timestamp) AS day, "
+            "SELECT date(timestamp, 'localtime') AS day, "
             "  ROUND(AVG(noise_value), 1) AS avg_noise, "
             "  ROUND(MAX(noise_value), 1) AS peak_noise "
             "FROM readings WHERE timestamp >= ? GROUP BY day ORDER BY day DESC LIMIT 30",
@@ -115,7 +115,7 @@ def query_daily_stats(db_path: str, since_iso: str) -> list[dict]:
         ).fetchall()
         stats = [dict(r) for r in rows]
         event_rows = conn.execute(
-            "SELECT date(timestamp) AS day, COUNT(*) AS event_count "
+            "SELECT date(timestamp, 'localtime') AS day, COUNT(*) AS event_count "
             "FROM events WHERE timestamp >= ? GROUP BY day",
             (since_iso,),
         ).fetchall()
