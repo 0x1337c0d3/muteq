@@ -354,7 +354,9 @@ def _render_html(
         formatter: function(params) {{
           if (!params.length) return '';
           const ts = new Date(params[0].value[0]);
-          const dstr = ts.toISOString().replace('T',' ').slice(0,19) + ' UTC';
+          const pad = n => String(n).padStart(2,'0');
+          const dstr = ts.getFullYear() + '-' + pad(ts.getMonth()+1) + '-' + pad(ts.getDate()) +
+            ' ' + pad(ts.getHours()) + ':' + pad(ts.getMinutes()) + ':' + pad(ts.getSeconds());
           const v = params[0].value[1];
           return dstr + '<br/><b>' + v.toFixed(1) + ' dB</b>';
         }},
