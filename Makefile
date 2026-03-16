@@ -18,6 +18,12 @@ help:
 install: ## Install local dev dependencies (ruff, fastapi, uvicorn)
 	uv sync --group dev
 
+# ── Dashboard ──────────────────────────────────────────────────────────────────
+.PHONY: dashboard
+dashboard: ## Run dashboard server locally at http://localhost:8080 (reads /tmp/muteq-test.db)
+	MUTEQ_DB=./muteq.db MUTEQ_CONFIG=sensor/client_config.json \
+	  uv run uvicorn dashboard.server:app --reload --port 8080
+
 # ── Code quality ──────────────────────────────────────────────────────────────
 .PHONY: fmt
 fmt: ## Format all Python code with ruff
