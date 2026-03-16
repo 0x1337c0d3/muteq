@@ -4,6 +4,8 @@ SHELL := /bin/bash
 REPO_ROOT  := $(shell pwd)
 STACK_NAME ?= muteq-dashboard
 DOMAIN     ?= www.hoongram.com
+LAMBDA_DIR := $(REPO_ROOT)/lambda
+LAMBDA_BUILD_DIR := $(LAMBDA_DIR)/.build
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 .PHONY: help
@@ -11,20 +13,25 @@ help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
+# ── Setup ─────────────────────────────────────────────────────────────────────
+.PHONY: install
+install: ## Install local dev dependencies (ruff, fastapi, uvicorn)
+	uv sync --group dev
+
 # ── Code quality ──────────────────────────────────────────────────────────────
 .PHONY: fmt
 fmt: ## Format all Python code with ruff
-	ruff format .
-	ruff check --fix --select I .
+	uv run ruff format .
+	uv run ruff check --fix --select I .
 
 .PHONY: lint
 lint: ## Lint all Python code with ruff (no auto-fix)
-	ruff check .
+	uv run ruff check .
 
 .PHONY: fmt-check
 fmt-check: ## Check formatting without making changes (CI-safe)
-	ruff format --check .
-	ruff check --select I .
+	uv run ruff format --check .
+	uv run ruff check --select I .
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 .PHONY: clean
@@ -50,9 +57,11 @@ aws-deploy: ## Deploy (or update) the S3/CloudFront CloudFormation stack
 	  --stack-name $(STACK_NAME) \
 	  --template-file cloudformation.yml \
 	  --region us-east-1 \
+	  --capabilities CAPABILITY_NAMED_IAM \
 	  --parameter-overrides \
 	    DomainName=$(DOMAIN) \
-	    HostedZoneId=$(HostedZoneId)
+	    HostedZoneId=$(HostedZoneId) \
+	    $(if $(ApiKey),ApiKey=$(ApiKey),)
 	@echo ""
 	@echo "✅ Stack deployed. Outputs:"
 	@aws cloudformation describe-stacks \
@@ -77,3 +86,4 @@ aws-delete: ## Tear down the CloudFormation stack (prompts for confirmation)
 	@echo "Waiting for deletion..."
 	aws cloudformation wait stack-delete-complete --stack-name $(STACK_NAME) --region us-east-1
 	@echo "✅ Stack deleted."
+

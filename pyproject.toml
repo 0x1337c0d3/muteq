@@ -1,3 +1,13 @@
+[project]
+name = "muteq"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.4.0",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

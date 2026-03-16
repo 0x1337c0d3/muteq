@@ -11,13 +11,14 @@ There is no backend server. Everything runs on the Pi.
 ## Commands
 
 ```bash
+make install         # Install dev dependencies (uv sync --group dev)
 make fmt             # Auto-format Python with ruff + sort imports
 make lint            # Lint check with ruff (no auto-fix)
 make fmt-check       # CI-safe format check
 make clean           # Remove Python caches and build artifacts
 
 # Local test (no USB meter needed)
-python sensor/test_runner.py   # writes to /tmp/muteq-test.db, HTML to /tmp/muteq-dashboard.html
+uv run python sensor/test_runner.py   # writes to /tmp/muteq-test.db, HTML to /tmp/muteq-dashboard.html
 
 # AWS — deploy S3/CloudFront/ACM stack (must run in us-east-1)
 make aws-deploy HostedZoneId=Z02362723Q3704KGHR8UQ    # deploy or update CloudFormation stack
@@ -92,4 +93,4 @@ Sensor config at `sensor/client_config.json` (template) or `/var/lib/muteq-senso
 
 ## Code Style
 
-Uses **ruff** for formatting and linting (replaces black/isort/flake8). Run `make fmt` before committing.
+Uses **uv** for dependency management and **ruff** for formatting and linting (replaces black/isort/flake8). Run `make fmt` before committing. Dev dependencies are in `pyproject.toml` under `[dependency-groups] dev`. The Pi's runtime dependencies remain in `sensor/requirements.txt` (installed via pip by `sensor/install.sh`).
