@@ -2,7 +2,7 @@
 Test runner for the MUTEq sensor.
 
 Simulates a real sensor by writing randomly generated SPL readings directly to
-a local SQLite database and generating the static HTML dashboard, without
+a local DuckDB database and generating the static HTML dashboard shell, without
 requiring a USB SPL meter.
 
 Usage (from the repo root):
@@ -11,7 +11,8 @@ Usage (from the repo root):
 Optional env vars:
     DEVICE_NAME     Sensor display name  (default: Test Sensor)
     INTERVAL        Seconds between readings  (default: 2)
-    DB_PATH         SQLite database path  (default: /tmp/muteq-test.db)
+    DB_PATH         DuckDB database path  (default: /tmp/muteq-test.db)
+    API_ENDPOINT    Lambda API base URL embedded in the HTML shell
     S3_BUCKET       If set, upload generated HTML to this bucket
     AWS_REGION      AWS region for S3  (default: us-east-1)
 """
@@ -39,6 +40,7 @@ TIME_WINDOW_SECONDS = 2.0
 DEVICE_NAME: str = os.environ.get("DEVICE_NAME", "Test Sensor")
 INTERVAL: float = float(os.environ.get("INTERVAL", "2"))
 DB_PATH: str = os.environ.get("DB_PATH", "/tmp/muteq-test.db")
+API_ENDPOINT: str = os.environ.get("API_ENDPOINT", "")
 S3_BUCKET: str = os.environ.get("S3_BUCKET", "")
 AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
 
@@ -130,11 +132,11 @@ def main():
 def _do_publish():
     try:
         html_content = generate_html(
-            db_path=DB_PATH,
             device_name=DEVICE_NAME,
             location="Test Location",
             environment_profile="traffic_roadside",
-            generated_at=datetime.now(timezone.utc),
+            api_endpoint=API_ENDPOINT,
+            device_id="test-device",
         )
     except Exception as exc:
         logger.error(f"HTML generation failed: {exc}")

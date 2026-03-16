@@ -1,4 +1,5 @@
-paho-mqtt
+duckdb
 pyusb
 pyserial
 boto3
+requests

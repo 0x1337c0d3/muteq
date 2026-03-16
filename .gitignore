@@ -2,8 +2,10 @@
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,python
 
 muteq.db
+*.duckdb
 server/.env
 server/muteq.db
+lambda/.build/
 sensor/test_client_config.json
 sensor/client_config.json
 SPL/

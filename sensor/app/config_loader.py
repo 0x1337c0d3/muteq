@@ -4,32 +4,30 @@ from copy import deepcopy
 from typing import Any, Dict
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "config_version": 3,
+    "config_version": 4,
     "device_name": "MUTEq Sensor",
     "local_device_id": None,
     "location": {"address": "", "lat": None, "lon": None, "country": ""},
     "environment_profile": "traffic_roadside",
     "custom_environment_label": "",
     "db_path": "/var/lib/muteq-sensor/muteq.db",
-    "publish_interval_seconds": 60,
+    # Lambda API
+    "api_endpoint": "",
+    "api_key": "",
+    "http_post_interval_seconds": 300,
+    # S3 / CloudFront
     "s3_bucket": "",
     "aws_region": "us-east-1",
     "aws_access_key_id": None,
     "aws_secret_access_key": None,
     "cloudfront_distribution_id": None,
+    # USB override
     "usb_override": {"vendor_id": None, "product_id": None},
-    "mqtt_enabled": False,
-    "mqtt_server": "",
-    "mqtt_port": 1883,
-    "mqtt_user": "",
-    "mqtt_pass": "",
-    "mqtt_tls": False,
     "log_level": "INFO",
 }
 
 
 def sanitize_device_name(name: str) -> str:
-    """Return a sanitized, bounded device name."""
     clean = (name or "MUTEq Sensor").strip()
     if not clean:
         clean = "MUTEq Sensor"
@@ -47,7 +45,6 @@ def merge_defaults(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def load_config(path: str, logger) -> Dict[str, Any]:
-    """Load configuration from disk. Returns merged config dict."""
     if not os.path.exists(path):
         logger.warning(f"Config file not found at {path}; using defaults.")
         return deepcopy(DEFAULT_CONFIG)
@@ -63,7 +60,6 @@ def load_config(path: str, logger) -> Dict[str, Any]:
 
 
 def persist_config(path: str, cfg: Dict[str, Any], logger) -> None:
-    """Persist configuration to disk."""
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
@@ -73,27 +69,23 @@ def persist_config(path: str, cfg: Dict[str, Any], logger) -> None:
 
 
 def validate_config(cfg: Dict[str, Any], logger) -> Dict[str, Any]:
-    """Apply minimal validation and defaults. Does not raise."""
     cfg = merge_defaults(cfg)
     cfg["device_name"] = sanitize_device_name(cfg.get("device_name"))
 
-    if not isinstance(cfg.get("mqtt_port"), int):
-        try:
-            cfg["mqtt_port"] = int(cfg.get("mqtt_port", 1883))
-        except Exception:
-            cfg["mqtt_port"] = 1883
-
     try:
-        cfg["publish_interval_seconds"] = int(cfg.get("publish_interval_seconds", 60))
-        if cfg["publish_interval_seconds"] < 1:
-            cfg["publish_interval_seconds"] = 60
+        cfg["http_post_interval_seconds"] = int(cfg.get("http_post_interval_seconds", 300))
+        if cfg["http_post_interval_seconds"] < 10:
+            cfg["http_post_interval_seconds"] = 300
     except Exception:
-        cfg["publish_interval_seconds"] = 60
+        cfg["http_post_interval_seconds"] = 300
 
     if not cfg.get("db_path"):
         cfg["db_path"] = DEFAULT_CONFIG["db_path"]
 
     if not cfg.get("s3_bucket"):
         logger.warning("[CONFIG] s3_bucket is not set — S3 uploads will be skipped.")
+
+    if not cfg.get("api_endpoint"):
+        logger.warning("[CONFIG] api_endpoint is not set — live chart will show placeholder.")
 
     return cfg

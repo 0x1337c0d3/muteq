@@ -4,6 +4,8 @@ SHELL := /bin/bash
 REPO_ROOT  := $(shell pwd)
 STACK_NAME ?= muteq-dashboard
 DOMAIN     ?= www.hoongram.com
+LAMBDA_DIR := $(REPO_ROOT)/lambda
+LAMBDA_BUILD_DIR := $(LAMBDA_DIR)/.build
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 .PHONY: help
@@ -50,9 +52,11 @@ aws-deploy: ## Deploy (or update) the S3/CloudFront CloudFormation stack
 	  --stack-name $(STACK_NAME) \
 	  --template-file cloudformation.yml \
 	  --region us-east-1 \
+	  --capabilities CAPABILITY_NAMED_IAM \
 	  --parameter-overrides \
 	    DomainName=$(DOMAIN) \
-	    HostedZoneId=$(HostedZoneId)
+	    HostedZoneId=$(HostedZoneId) \
+	    $(if $(ApiKey),ApiKey=$(ApiKey),)
 	@echo ""
 	@echo "✅ Stack deployed. Outputs:"
 	@aws cloudformation describe-stacks \
@@ -77,3 +81,53 @@ aws-delete: ## Tear down the CloudFormation stack (prompts for confirmation)
 	@echo "Waiting for deletion..."
 	aws cloudformation wait stack-delete-complete --stack-name $(STACK_NAME) --region us-east-1
 	@echo "✅ Stack deleted."
+
+# ── Lambda build + deploy ──────────────────────────────────────────────────────
+# Packages the ingest and query Lambda functions with their dependencies and
+# uploads the code to AWS.  Run after `make aws-deploy` (which creates the
+# Lambda function stubs).
+#
+#   make lambda-deploy          # build + deploy both functions
+#   make lambda-build           # only build the zip files (useful for inspection)
+
+.PHONY: lambda-build
+lambda-build: ## Build Lambda deployment zip packages
+	@echo "Building Lambda packages (requires Docker or pip on x86_64/arm64)..."
+	rm -rf $(LAMBDA_BUILD_DIR)
+	mkdir -p $(LAMBDA_BUILD_DIR)/ingest $(LAMBDA_BUILD_DIR)/query
+	# Install dependencies for arm64 (matches Lambda Architectures: arm64)
+	pip install \
+	  --platform manylinux2014_aarch64 \
+	  --target $(LAMBDA_BUILD_DIR)/ingest \
+	  --implementation cp \
+	  --python-version 3.12 \
+	  --only-binary=:all: \
+	  pyarrow boto3
+	pip install \
+	  --platform manylinux2014_aarch64 \
+	  --target $(LAMBDA_BUILD_DIR)/query \
+	  --implementation cp \
+	  --python-version 3.12 \
+	  --only-binary=:all: \
+	  "duckdb>=0.10.0" boto3
+	cp $(LAMBDA_DIR)/ingest/handler.py $(LAMBDA_BUILD_DIR)/ingest/
+	cp $(LAMBDA_DIR)/query/handler.py  $(LAMBDA_BUILD_DIR)/query/
+	cd $(LAMBDA_BUILD_DIR)/ingest && zip -r ../muteq-ingest.zip . -q
+	cd $(LAMBDA_BUILD_DIR)/query  && zip -r ../muteq-query.zip  . -q
+	@echo "✅ Built: $(LAMBDA_BUILD_DIR)/muteq-ingest.zip  $(LAMBDA_BUILD_DIR)/muteq-query.zip"
+
+.PHONY: lambda-deploy
+lambda-deploy: lambda-build ## Build and deploy Lambda functions to AWS
+	aws lambda update-function-code \
+	  --function-name muteq-ingest \
+	  --zip-file fileb://$(LAMBDA_BUILD_DIR)/muteq-ingest.zip \
+	  --region us-east-1 \
+	  --architectures arm64 \
+	  --query 'FunctionName' --output text
+	aws lambda update-function-code \
+	  --function-name muteq-query \
+	  --zip-file fileb://$(LAMBDA_BUILD_DIR)/muteq-query.zip \
+	  --region us-east-1 \
+	  --architectures arm64 \
+	  --query 'FunctionName' --output text
+	@echo "✅ Lambda functions deployed."

@@ -1,6 +1,7 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
-  MUTEq static dashboard — S3 website, CloudFront HTTPS, ACM certificate, Route53 A record.
+  MUTEq — S3 static dashboard, CloudFront HTTPS, ACM cert, Route53,
+  Lambda ingest/query API with API Gateway HTTP API, and S3 Parquet data store.
   Deploy this stack in us-east-1 (required for CloudFront ACM certificates).
 
 # ── Parameters ────────────────────────────────────────────────────────────────
@@ -9,16 +10,22 @@ Parameters:
   DomainName:
     Type: String
     Default: www.hoongram.com
-    Description: Public hostname for the dashboard (must be in the Route53 hosted zone)
+    Description: Public hostname for the dashboard
 
   HostedZoneId:
     Type: AWS::Route53::HostedZone::Id
-    Description: Route53 hosted zone ID for hoongram.com (must already exist)
+    Description: Route53 hosted zone ID for hoongram.com
+
+  ApiKey:
+    Type: String
+    NoEcho: true
+    Default: ''
+    Description: Shared secret sent by the Pi when POSTing readings (leave blank to disable auth)
 
 # ── Resources ─────────────────────────────────────────────────────────────────
 Resources:
 
-  # ── S3 bucket ──────────────────────────────────────────────────────────────
+  # ── S3: dashboard bucket ───────────────────────────────────────────────────
   DashboardBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -35,7 +42,6 @@ Resources:
         - Key: Name
           Value: muteq-dashboard
 
-  # Public read — required for S3 website endpoint used as CloudFront origin
   DashboardBucketPolicy:
     Type: AWS::S3::BucketPolicy
     Properties:
@@ -48,9 +54,29 @@ Resources:
             Action: s3:GetObject
             Resource: !Sub 'arn:aws:s3:::${DomainName}/*'
 
+  # ── S3: Parquet data bucket ────────────────────────────────────────────────
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'muteq-data-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldReadings
+            Status: Enabled
+            # Parquet files under readings/ expire after 35 days
+            Filter:
+              Prefix: readings/
+            ExpirationInDays: 35
+      Tags:
+        - Key: Name
+          Value: muteq-data
+
   # ── ACM certificate ────────────────────────────────────────────────────────
-  # NOTE: Stack must be deployed in us-east-1; CloudFront requires ACM certs
-  # to be in that region regardless of where your other resources live.
   Certificate:
     Type: AWS::CertificateManager::Certificate
     Properties:
@@ -69,14 +95,11 @@ Resources:
         Enabled: true
         DefaultRootObject: index.html
         HttpVersion: http2
-        # PriceClass_100 = US + Europe edge nodes only (lowest cost)
         PriceClass: PriceClass_100
         Aliases:
           - !Ref DomainName
         Origins:
           - Id: S3WebsiteOrigin
-            # Use the S3 website endpoint (not REST) so index.html redirect works.
-            # This endpoint is HTTP-only — CloudFront handles the HTTPS termination.
             DomainName: !Sub '${DomainName}.s3-website-us-east-1.amazonaws.com'
             CustomOriginConfig:
               HTTPPort: 80
@@ -88,8 +111,6 @@ Resources:
           AllowedMethods: [GET, HEAD]
           CachedMethods: [GET, HEAD]
           Compress: true
-          # CachingDisabled managed policy — CloudFront always fetches from S3.
-          # Correct here because the Pi uploads fresh HTML every ~60s.
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
         ViewerCertificate:
           AcmCertificateArn: !Ref Certificate
@@ -105,24 +126,173 @@ Resources:
       Name: !Sub '${DomainName}.'
       Type: A
       AliasTarget:
-        # CloudFront's fixed hosted zone ID (constant across all distributions)
         HostedZoneId: Z2FDTNDATAQYW2
         DNSName: !GetAtt CloudFrontDistribution.DomainName
         EvaluateTargetHealth: false
+
+  # ── IAM role for Lambda functions ─────────────────────────────────────────
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: muteq-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: muteq-s3-data
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt DataBucket.Arn
+                  - !Sub '${DataBucket.Arn}/*'
+
+  # ── Lambda: ingest ─────────────────────────────────────────────────────────
+  # Placeholder inline code; real code deployed via `make lambda-deploy`.
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: muteq-ingest
+      Description: Receives batched SPL readings from the Pi and writes Parquet to S3
+      Runtime: python3.12
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Architectures: [arm64]
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucket
+          API_KEY: !Ref ApiKey
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {'statusCode': 503, 'body': 'Deploy real code with: make lambda-deploy'}
+
+  # ── Lambda: query ──────────────────────────────────────────────────────────
+  QueryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: muteq-query
+      Description: Queries Parquet data via DuckDB and returns dashboard JSON
+      Runtime: python3.12
+      Handler: handler.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Architectures: [arm64]
+      Environment:
+        Variables:
+          DATA_BUCKET: !Ref DataBucket
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {'statusCode': 503, 'body': 'Deploy real code with: make lambda-deploy'}
+
+  # ── API Gateway HTTP API ───────────────────────────────────────────────────
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: muteq-api
+      ProtocolType: HTTP
+      Description: MUTEq Lambda API — ingest and query
+      CorsConfiguration:
+        AllowOrigins:
+          - !Sub 'https://${DomainName}'
+          - '*'
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [Content-Type]
+        MaxAge: 300
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: '$default'
+      AutoDeploy: true
+
+  IngestIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations'
+        - FnArn: !GetAtt IngestFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  QueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations'
+        - FnArn: !GetAtt QueryFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  IngestRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /ingest'
+      Target: !Sub 'integrations/${IngestIntegration}'
+
+  QueryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /data'
+      Target: !Sub 'integrations/${QueryIntegration}'
+
+  IngestLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/ingest'
+
+  QueryLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref QueryFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*/data'
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
 Outputs:
 
   BucketName:
-    Description: S3 bucket name — set s3_bucket to this in client_config.json
+    Description: S3 dashboard bucket — set s3_bucket in config_client.json
     Value: !Ref DashboardBucket
+
+  DataBucketName:
+    Description: S3 Parquet data bucket (internal, Lambda only)
+    Value: !Ref DataBucket
+
+  ApiEndpoint:
+    Description: Lambda API base URL — set api_endpoint in config_client.json
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
 
   CloudFrontDomain:
     Description: CloudFront domain (use for testing before DNS propagates)
     Value: !GetAtt CloudFrontDistribution.DomainName
 
   CloudFrontDistributionId:
-    Description: CloudFront distribution ID (for manual cache invalidation if needed)
+    Description: CloudFront distribution ID
     Value: !Ref CloudFrontDistribution
 
   DashboardURL:

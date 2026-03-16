@@ -13,11 +13,11 @@ from typing import Optional
 from .config_loader import DEFAULT_CONFIG, load_config, persist_config, validate_config
 from .db import init_db, prune_old_data, write_event, write_reading
 from .html_generator import generate_html
-from .mqtt_client import MuteqMqttClient
+from .http_poster import HttpPoster
 from .s3_uploader import upload_dashboard
 from .usb_reader import find_usb_device, read_spl_value
 
-CLIENT_VERSION = "0.1.0"
+CLIENT_VERSION = "0.2.0"
 TIME_WINDOW_SECONDS = 0.1
 MINIMUM_NOISE_LEVEL = 70.0
 
@@ -31,26 +31,23 @@ def setup_logging(level: str) -> logging.Logger:
 
 
 class MuteqClientApp:
-    """Sensor orchestration: reads USB SPL → SQLite → periodic S3 HTML upload."""
+    """Sensor orchestration: reads USB SPL → DuckDB → HTTP batch POST to Lambda."""
 
     def __init__(self):
         self.logger = setup_logging("INFO")
         self.config_path = Path()
         self._ensure_persistent_config()
         self.cfg = load_config(self.config_path, self.logger)
-        self._apply_local_mqtt_overrides()
         self.cfg = validate_config(self.cfg, self.logger)
         self.logger = setup_logging(self.cfg.get("log_level", "INFO"))
         self.logger.info(f"Loaded configuration from {self.config_path}")
         self._ensure_local_device_id()
         self.stop_event = False
-        self.mqtt_client: Optional[MuteqMqttClient] = None
+        self.http_poster: Optional[HttpPoster] = None
         self.usb_device = None
         self.db_path: str = self.cfg.get("db_path", DEFAULT_CONFIG["db_path"])
-        self._upload_thread: Optional[threading.Thread] = None
 
     def _ensure_local_device_id(self):
-        """Derive a stable local device ID from device_name if not already set."""
         if not self.cfg.get("local_device_id"):
             device_name = self.cfg.get("device_name", "MUTEq Sensor")
             self.cfg["local_device_id"] = hashlib.sha256(device_name.encode()).hexdigest()[:16]
@@ -64,23 +61,19 @@ class MuteqClientApp:
         signal.signal(signal.SIGINT, handler)
         signal.signal(signal.SIGTERM, handler)
 
-    def init_mqtt(self):
-        if not self.cfg.get("mqtt_enabled"):
+    def init_http_poster(self):
+        api_endpoint = self.cfg.get("api_endpoint") or ""
+        api_key = self.cfg.get("api_key") or ""
+        if not api_endpoint:
+            self.logger.info("[HTTP] api_endpoint not set — batch posting disabled.")
             return
-        location = self.cfg.get("location") or {}
-        self.mqtt_client = MuteqMqttClient(
-            device_id=self.cfg.get("local_device_id"),
-            device_name=self.cfg.get("device_name"),
-            address=location.get("address") or "",
-            env_profile=self.cfg.get("environment_profile") or "traffic_roadside",
-            server=self.cfg.get("mqtt_server") or "",
-            port=self.cfg.get("mqtt_port") or 1883,
-            username=self.cfg.get("mqtt_user") or "",
-            password=self.cfg.get("mqtt_pass") or "",
-            tls=bool(self.cfg.get("mqtt_tls")),
+        self.http_poster = HttpPoster(
+            api_endpoint=api_endpoint,
+            device_id=self.cfg.get("local_device_id", ""),
+            api_key=api_key,
             logger=self.logger,
         )
-        self.mqtt_client.connect()
+        self.logger.info(f"[HTTP] Poster initialized → {api_endpoint}")
 
     def init_usb(self):
         usb_override = self.cfg.get("usb_override") or {}
@@ -96,24 +89,24 @@ class MuteqClientApp:
             product_id_int = None
         self.usb_device = find_usb_device(vendor_id_int, product_id_int, self.logger)
 
-    def _publish_dashboard(self):
-        """Generate static HTML from SQLite and upload to S3."""
+    def _upload_dashboard_shell(self):
+        """Generate the static HTML shell and upload to S3 once."""
+        bucket = self.cfg.get("s3_bucket", "")
+        if not bucket:
+            self.logger.warning("[S3] s3_bucket not configured; skipping HTML upload.")
+            return
+
         location = self.cfg.get("location") or {}
         try:
             html_content = generate_html(
-                db_path=self.db_path,
                 device_name=self.cfg.get("device_name", "MUTEq Sensor"),
                 location=location.get("address") or "",
                 environment_profile=self.cfg.get("environment_profile") or "",
-                generated_at=datetime.now(timezone.utc),
+                api_endpoint=self.cfg.get("api_endpoint") or "",
+                device_id=self.cfg.get("local_device_id") or "",
             )
         except Exception as exc:
             self.logger.error(f"HTML generation failed: {exc}")
-            return
-
-        bucket = self.cfg.get("s3_bucket", "")
-        if not bucket:
-            self.logger.warning("[S3] s3_bucket not configured; skipping upload.")
             return
 
         success = upload_dashboard(
@@ -127,12 +120,12 @@ class MuteqClientApp:
             logger=self.logger,
         )
         if success:
-            self.logger.info(f"[S3] Dashboard uploaded to s3://{bucket}/index.html")
+            self.logger.info(f"[S3] Dashboard shell uploaded to s3://{bucket}/index.html")
 
     def measurement_loop(self):
         self.logger.info("Starting measurement loop.")
-        publish_interval = float(self.cfg.get("publish_interval_seconds", 60))
-        last_publish = 0.0
+        post_interval = float(self.cfg.get("http_post_interval_seconds", 300))
+        last_post = 0.0
 
         while not self.stop_event:
             window_start = time.time()
@@ -157,28 +150,25 @@ class MuteqClientApp:
                 flush=True,
             )
 
-            if self.mqtt_client:
-                self.mqtt_client.publish_realtime(current_peak)
+            if self.http_poster:
+                self.http_poster.add_reading(ts, current_peak, current_peak)
 
             if current_peak >= MINIMUM_NOISE_LEVEL:
                 write_event(self.db_path, ts, current_peak, current_peak)
-                if self.mqtt_client:
-                    self.mqtt_client.publish_threshold(current_peak, current_peak)
 
             now = time.time()
-            if now - last_publish >= publish_interval:
-                if self._upload_thread and self._upload_thread.is_alive():
-                    self.logger.warning("[S3] Previous upload still running, skipping this cycle.")
-                else:
-                    self._upload_thread = threading.Thread(
-                        target=self._publish_dashboard, daemon=True
-                    )
-                    self._upload_thread.start()
-                last_publish = now
+            if now - last_post >= post_interval:
+                if self.http_poster:
+                    threading.Thread(
+                        target=self.http_poster.flush, daemon=True
+                    ).start()
+                last_post = now
 
     def shutdown(self):
-        if self.mqtt_client:
-            self.mqtt_client.disconnect()
+        # Final flush of any buffered readings
+        if self.http_poster:
+            self.logger.info("[HTTP] Flushing remaining readings on shutdown…")
+            self.http_poster.flush()
         self.logger.info("Shutdown complete.")
 
     def _ensure_persistent_config(self):
@@ -207,38 +197,14 @@ class MuteqClientApp:
                 sys.exit(1)
         self.config_path = config_file
 
-    def _apply_local_mqtt_overrides(self):
-        def parse_bool(val: str):
-            return val.strip().lower() in ("1", "true", "yes", "on")
-
-        overrides = {
-            "LOCAL_MQTT_ENABLED": ("mqtt_enabled", "bool"),
-            "LOCAL_MQTT_SERVER": ("mqtt_server", "str"),
-            "LOCAL_MQTT_PORT": ("mqtt_port", "int"),
-            "LOCAL_MQTT_USER": ("mqtt_user", "str"),
-            "LOCAL_MQTT_PASS": ("mqtt_pass", "str"),
-            "LOCAL_MQTT_TLS": ("mqtt_tls", "bool"),
-        }
-        for env_key, (cfg_key, kind) in overrides.items():
-            raw = os.environ.get(env_key)
-            if raw is None:
-                continue
-            try:
-                if kind == "bool":
-                    self.cfg[cfg_key] = parse_bool(raw)
-                elif kind == "int":
-                    self.cfg[cfg_key] = int(raw)
-                else:
-                    self.cfg[cfg_key] = raw
-            except Exception:
-                continue
-
     def run(self):
         self.register_signals()
         init_db(self.db_path)
         prune_old_data(self.db_path)
         self.init_usb()
-        self.init_mqtt()
+        self.init_http_poster()
+        # Upload the dashboard HTML shell once at startup so the page is live
+        threading.Thread(target=self._upload_dashboard_shell, daemon=True).start()
         try:
             self.measurement_loop()
         finally:
