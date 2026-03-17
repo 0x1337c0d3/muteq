@@ -187,8 +187,7 @@ async def get_readings(
             rows = list(reversed(rows))
         else:
             rows = conn.execute(
-                "SELECT timestamp, noise_value FROM readings "
-                "ORDER BY timestamp DESC LIMIT ?",
+                "SELECT timestamp, noise_value FROM readings ORDER BY timestamp DESC LIMIT ?",
                 (_MAX_DB_FETCH,),
             ).fetchall()
             rows = list(reversed(rows))
@@ -196,7 +195,11 @@ async def get_readings(
         conn.close()
 
     rows = _downsample(list(rows), limit)
-    return [{"time": _to_unix(r["timestamp"]), "value": r["noise_value"]} for r in rows]
+    return [
+        {"time": _to_unix(r["timestamp"]), "value": r["noise_value"]}
+        for r in rows
+        if r["noise_value"] is not None
+    ]
 
 
 @app.get("/api/events")
@@ -246,7 +249,9 @@ async def get_events(
 
 @app.get("/api/stats")
 async def get_stats(
-    from_ts: int | None = Query(None, description="Window start unix timestamp; defaults to 24h ago"),
+    from_ts: int | None = Query(
+        None, description="Window start unix timestamp; defaults to 24h ago"
+    ),
 ):
     """Return KPI stats, histogram, hourly heatmap, and daily summary."""
     if from_ts is None:

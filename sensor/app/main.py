@@ -14,6 +14,7 @@ from .config_loader import DEFAULT_CONFIG, load_config, persist_config, validate
 from .db import init_db, prune_old_data, write_event, write_reading
 from .mqtt_client import MuteqMqttClient
 from .server_client import flush as flush_to_server
+from .smoothing import AsymmetricEMA
 from .usb_reader import find_usb_device, read_spl_value
 
 CLIENT_VERSION = "0.1.0"
@@ -47,6 +48,8 @@ class MuteqClientApp:
         self.usb_device = None
         self.db_path: str = self.cfg.get("db_path", DEFAULT_CONFIG["db_path"])
         self._flush_thread: Optional[threading.Thread] = None
+        self._ema = AsymmetricEMA(rise_alpha=0.5, fall_alpha=0.05)
+        self._last_mqtt_realtime = 0.0
 
     def _ensure_local_device_id(self):
         """Derive a stable local device ID from device_name if not already set."""
@@ -122,16 +125,21 @@ class MuteqClientApp:
             if current_peak is None:
                 continue
 
+            smoothed = self._ema.update(current_peak)
             ts = datetime.now(timezone.utc).isoformat()
-            write_reading(self.db_path, ts, current_peak, current_peak)
+            write_reading(self.db_path, ts, smoothed, smoothed)
             print(
-                f"\n{datetime.now().strftime('%H:%M:%S')}  {current_peak:5.1f} dB",
+                f"\n{datetime.now().strftime('%H:%M:%S')}  {current_peak:5.1f} dB  (smoothed {smoothed:5.1f})",
                 end="",
                 flush=True,
             )
 
             if self.mqtt_client:
-                self.mqtt_client.publish_realtime(current_peak)
+                mqtt_realtime_interval = float(self.cfg.get("mqtt_realtime_interval_seconds", 5))
+                now = time.time()
+                if now - self._last_mqtt_realtime >= mqtt_realtime_interval:
+                    self.mqtt_client.publish_realtime(smoothed)
+                    self._last_mqtt_realtime = now
 
             if current_peak >= MINIMUM_NOISE_LEVEL:
                 write_event(self.db_path, ts, current_peak, current_peak)
@@ -141,11 +149,11 @@ class MuteqClientApp:
             now = time.time()
             if now - last_publish >= publish_interval:
                 if self._flush_thread and self._flush_thread.is_alive():
-                    self.logger.warning("[SERVER] Previous flush still running, skipping this cycle.")
-                else:
-                    self._flush_thread = threading.Thread(
-                        target=self._flush_to_server, daemon=True
+                    self.logger.warning(
+                        "[SERVER] Previous flush still running, skipping this cycle."
                     )
+                else:
+                    self._flush_thread = threading.Thread(target=self._flush_to_server, daemon=True)
                     self._flush_thread.start()
                 last_publish = now
 

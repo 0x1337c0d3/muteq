@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>MUTEq Dashboard</title>
-  <link rel="stylesheet" href="/static/dashboard.css" />
+  <link rel="stylesheet" href="/static/dashboard.css?v=5" />
   <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -52,11 +52,8 @@
     <!-- Main SPL chart -->
     <div class="panel chart-panel">
       <div class="panel-header">
-        <h2 id="chart-title">SPL &mdash; last 1d</h2>
-        <div class="tf-buttons">
-          <button class="tf-btn active" data-tf="1d"  data-label="last 1d">1d</button>
-          <button class="tf-btn" data-tf="1w"  data-label="last 1w">1w</button>
-        </div>
+        <h2 id="chart-title">SPL</h2>
+        <button id="live-btn" class="tf-btn">Live</button>
       </div>
       <div id="chart-container">
         <div id="spl-tooltip" class="hidden"></div>
@@ -96,7 +93,7 @@
     <!-- Threshold events table -->
     <div class="panel">
       <div class="panel-header">
-        <h2 id="events-title">Threshold Events &mdash; last 1d</h2>
+        <h2>Threshold Events &mdash; last 24h</h2>
       </div>
       <table>
         <thead>
@@ -110,6 +107,6 @@
 
   </main>
 
-  <script src="/static/dashboard.js"></script>
+  <script src="/static/dashboard.js?v=5"></script>
 </body>
 </html>

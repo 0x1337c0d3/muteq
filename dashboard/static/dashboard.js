@@ -2,8 +2,8 @@
  * MUTEq Dashboard — TradingView Lightweight Charts
  *
  * Features:
- *  - SPL line/area chart with timeframe buttons (10m / 1h / 1d / 1w / 1m)
- *  - Lazy scroll-back: fetches older batches when the user scrolls left
+ *  - SPL area chart; initial view = last 2h, scroll back freely
+ *  - Live mode: toggleable rolling 30-min window that tracks new data
  *  - Auto-refresh every 30 s: appends new readings and refreshes stats
  *  - CSS bar charts for noise distribution histogram + hourly event heatmap
  *  - KPI cards, daily stats table, threshold events table
@@ -13,22 +13,20 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const BATCH_SIZE = 2000;
-const PREFETCH_BARS = 50;          // trigger history-load this many bars from left edge
-const REFRESH_INTERVAL_MS = 30_000;
-
-/** How many seconds each timeframe window covers. */
-const TF_SECONDS = {
-  '1d': 24 * 60 * 60,
-  '1w':  7 * 24 * 60 * 60,
-};
+const BATCH_SIZE            = 2000;
+const PREFETCH_BARS         = 50;           // trigger history-load this many bars from left edge
+const REFRESH_INTERVAL_MS   = 30_000;
+const INITIAL_WINDOW_SECONDS = 2 * 60 * 60; // 2 h shown on first load
+const LIVE_WINDOW_SECONDS    = 30 * 60;      // 30 min rolling window in live mode
+const STATS_WINDOW_SECONDS   = 24 * 60 * 60; // 24 h window for KPI / events panel
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-let chart     = null;
-let splSeries = null;
+let chart          = null;
+let splSeries      = null;
+let priceLinesAdded = false;
+let liveMode       = false;
 
-let currentTf     = '10m';
 let loadedData    = [];   // [{time: unix_seconds, value: dB}], sorted ascending
 let isLoading     = false;
 let noMoreHistory = false;
@@ -82,23 +80,17 @@ function createChart() {
       timeVisible: true,
       secondsVisible: false,
       rightOffset: 12,
-      // Render all axis tick labels in the browser's local timezone (e.g. AEST)
+      // Render all axis tick labels in the browser's local timezone
       tickMarkFormatter: (ts, tickMarkType) => {
         const d = new Date(ts * 1000);
         const TT = LightweightCharts.TickMarkType;
         switch (tickMarkType) {
-          case TT.Year:
-            return d.toLocaleDateString([], { year: 'numeric' });
-          case TT.Month:
-            return d.toLocaleDateString([], { month: 'short', year: 'numeric' });
-          case TT.DayOfMonth:
-            return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
-          case TT.Time:
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-          case TT.TimeWithSeconds:
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-          default:
-            return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          case TT.Year:        return d.toLocaleDateString([], { year: 'numeric' });
+          case TT.Month:       return d.toLocaleDateString([], { month: 'short', year: 'numeric' });
+          case TT.DayOfMonth:  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+          case TT.Time:        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          case TT.TimeWithSeconds: return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          default:             return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
       },
     },
@@ -107,41 +99,19 @@ function createChart() {
   });
 
   splSeries = chart.addAreaSeries({
-    topColor:              'rgba(56, 189, 248, 0.28)',
-    bottomColor:           'rgba(56, 189, 248, 0.02)',
-    lineColor:             '#38bdf8',
-    lineWidth:             2,
-    priceLineVisible:      false,
-    lastValueVisible:      true,
+    topColor:               'rgba(56, 189, 248, 0.28)',
+    bottomColor:            'rgba(56, 189, 248, 0.02)',
+    lineColor:              '#38bdf8',
+    lineWidth:              2,
+    priceLineVisible:       false,
+    lastValueVisible:       true,
     crosshairMarkerVisible: true,
-    crosshairMarkerRadius: 4,
+    crosshairMarkerRadius:  4,
     priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
   });
 
-  // 60 dB lower band line
-  splSeries.createPriceLine({
-    price:       60,
-    color:       '#4ade80',
-    lineWidth:   1,
-    lineStyle:   LightweightCharts.LineStyle.Dashed,
-    axisLabelVisible: true,
-    title:       '60 dB',
-  });
-
-  // 70 dB threshold line
-  splSeries.createPriceLine({
-    price:       70,
-    color:       '#f87171',
-    lineWidth:   1,
-    lineStyle:   LightweightCharts.LineStyle.Dashed,
-    axisLabelVisible: true,
-    title:       '70 dB',
-  });
-
-  // Crosshair tooltip
   chart.subscribeCrosshairMove(updateTooltip);
 
-  // Keep chart filling its container on resize
   new ResizeObserver(() => {
     chart.applyOptions({
       width:  container.clientWidth,
@@ -149,7 +119,6 @@ function createChart() {
     });
   }).observe(container);
 
-  // Lazy-load older history when scrolling left
   chart.timeScale().subscribeVisibleLogicalRangeChange(onRangeChange);
 }
 
@@ -172,6 +141,22 @@ function updateTooltip(param) {
     `<span class="tt-time">${dt.toLocaleString()}</span>` +
     `<span class="tt-val" style="color:${color}">${bar.value.toFixed(1)} dB</span>`;
   tooltip.classList.remove('hidden');
+}
+
+// ── Live mode ─────────────────────────────────────────────────────────────────
+
+function applyLiveRange() {
+  const now = Math.floor(Date.now() / 1000);
+  chart.timeScale().setVisibleRange({
+    from: now - LIVE_WINDOW_SECONDS,
+    to:   now,
+  });
+}
+
+function toggleLive() {
+  liveMode = !liveMode;
+  $('live-btn').classList.toggle('active', liveMode);
+  if (liveMode) applyLiveRange();
 }
 
 // ── API ───────────────────────────────────────────────────────────────────────
@@ -221,31 +206,42 @@ function mergeData(newData) {
 }
 
 function applyDataToChart() {
-  if (splSeries) splSeries.setData(loadedData);
+  if (!splSeries) return;
+  // Deduplicate by time (keep last per second) and drop null/NaN values
+  const seen = new Map();
+  for (const d of loadedData) {
+    if (d.value != null && isFinite(d.value)) seen.set(d.time, d);
+  }
+  const clean = Array.from(seen.values()).sort((a, b) => a.time - b.time);
+  splSeries.setData(clean);
+  if (!priceLinesAdded && clean.length > 0) {
+    splSeries.createPriceLine({
+      price: 60, color: '#4ade80', lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: '60 dB',
+    });
+    splSeries.createPriceLine({
+      price: 70, color: '#f87171', lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: '70 dB',
+    });
+    priceLinesAdded = true;
+  }
 }
 
 // ── Load / reload ─────────────────────────────────────────────────────────────
 
-/** Full reload for new timeframe selection. */
-async function loadTimeframe(tf) {
+async function loadInitial() {
   if (isLoading) return;
   isLoading     = true;
   noMoreHistory = false;
   loadedData    = [];
-  currentTf     = tf;
-
-  // Update button + title
-  document.querySelectorAll('.tf-btn').forEach((b) => {
-    b.classList.toggle('active', b.dataset.tf === tf);
-  });
-  const activeBtn = document.querySelector(`.tf-btn[data-tf="${tf}"]`);
-  if (activeBtn) $('chart-title').textContent = `SPL \u2014 ${activeBtn.dataset.label}`;
 
   showLoading(true);
   showEmpty(false);
   setStatus('Loading\u2026', 'loading');
 
-  const fromTs = Math.floor(Date.now() / 1000) - TF_SECONDS[tf];
+  const fromTs = Math.floor(Date.now() / 1000) - INITIAL_WINDOW_SECONDS;
 
   try {
     const data = await fetchReadings(fromTs, null, BATCH_SIZE);
@@ -256,13 +252,16 @@ async function loadTimeframe(tf) {
     }
     mergeData(data);
     applyDataToChart();
-    chart.timeScale().scrollToRealTime();
+    if (liveMode) {
+      applyLiveRange();
+    } else {
+      chart.timeScale().scrollToRealTime();
+    }
     setStatus('Live', 'ok');
     markUpdated();
-
-    await refreshStats(fromTs, tf);
+    await refreshStats();
   } catch (err) {
-    console.error('loadTimeframe error:', err);
+    console.error('loadInitial error:', err);
     setStatus('Error', 'error');
   } finally {
     showLoading(false);
@@ -270,7 +269,7 @@ async function loadTimeframe(tf) {
   }
 }
 
-/** Fetch older candles when the user scrolls left. */
+/** Fetch older data when the user scrolls left. */
 async function loadOlderHistory() {
   if (isLoading || noMoreHistory || !loadedData.length) return;
   isLoading = true;
@@ -291,12 +290,13 @@ async function loadOlderHistory() {
   }
 }
 
-/** Poll for new readings and refresh stats. */
+/** Poll for new readings and refresh stats every 30 s. */
 async function refreshLatest() {
-  if (isLoading || !loadedData.length) return;
+  if (isLoading) return;
+  // If initial load found no data, retry a full load instead
+  if (!loadedData.length) { await loadInitial(); return; }
 
   const latestTime = loadedData[loadedData.length - 1].time;
-  const fromTs     = Math.floor(Date.now() / 1000) - TF_SECONDS[currentTf];
 
   try {
     const data = await fetchReadings(latestTime + 1, null, BATCH_SIZE);
@@ -305,7 +305,8 @@ async function refreshLatest() {
       applyDataToChart();
       markUpdated();
     }
-    await refreshStats(fromTs, currentTf);
+    if (liveMode) applyLiveRange();
+    await refreshStats();
     setStatus('Live', 'ok');
   } catch (err) {
     console.error('refreshLatest error:', err);
@@ -313,7 +314,8 @@ async function refreshLatest() {
   }
 }
 
-async function refreshStats(fromTs, tf) {
+async function refreshStats() {
+  const fromTs = Math.floor(Date.now() / 1000) - STATS_WINDOW_SECONDS;
   try {
     const [stats, events] = await Promise.all([
       fetchStats(fromTs),
@@ -323,7 +325,7 @@ async function refreshStats(fromTs, tf) {
     renderHistogram(stats.histogram);
     renderHeatmap(stats.heatmap);
     renderDailyTable(stats.daily_stats);
-    renderEventsTable(events, tf);
+    renderEventsTable(events);
   } catch (err) {
     console.error('refreshStats error:', err);
   }
@@ -408,14 +410,10 @@ function renderDailyTable(daily) {
     .join('');
 }
 
-function renderEventsTable(events, tf) {
-  const activeBtn = document.querySelector(`.tf-btn[data-tf="${tf}"]`);
-  const label     = activeBtn ? activeBtn.dataset.label : tf;
-  $('events-title').textContent = `Threshold Events \u2014 ${label}`;
-
+function renderEventsTable(events) {
   const tbody = $('events-tbody');
   if (!events.length) {
-    tbody.innerHTML = '<tr><td colspan="3">No events in this period.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3">No events in the last 24h.</td></tr>';
     return;
   }
   tbody.innerHTML = events
@@ -433,26 +431,20 @@ function renderEventsTable(events, tf) {
 async function boot() {
   createChart();
 
-  // Load device config for header
   try {
     const cfg = await apiFetch('/api/config');
     document.title = `${cfg.device_name} \u2014 MUTEq`;
     $('device-name').textContent = cfg.device_name;
-    if (cfg.location)            $('location').textContent   = `\u{1F4CD} ${cfg.location}`;
+    if (cfg.location)            $('location').textContent    = `\u{1F4CD} ${cfg.location}`;
     if (cfg.environment_profile) $('env-profile').textContent = cfg.environment_profile;
   } catch (err) {
     console.warn('Could not load config:', err);
   }
 
-  // Timeframe button listeners
-  document.querySelectorAll('.tf-btn').forEach((btn) => {
-    btn.addEventListener('click', () => loadTimeframe(btn.dataset.tf));
-  });
+  $('live-btn').addEventListener('click', toggleLive);
 
-  // Initial load
-  await loadTimeframe('1d');
+  await loadInitial();
 
-  // Auto-refresh
   refreshTimer = setInterval(refreshLatest, REFRESH_INTERVAL_MS);
 }
 

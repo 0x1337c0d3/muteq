@@ -27,6 +27,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "log_level": "INFO",
     "server_url": None,
     "server_hmac_secret": None,
+    "mqtt_realtime_interval_seconds": 5,
 }
 
 
