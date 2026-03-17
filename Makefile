@@ -51,14 +51,23 @@ clean: ## Remove Python caches and build artefacts
 	@echo "✅ Clean."
 
 # ── AWS ───────────────────────────────────────────────────────────────────────
-# Deploy the S3/CloudFront/ACM stack to us-east-1 (required for CloudFront certs).
-# Requires: HostedZoneId — Route53 hosted zone ID for hoongram.com
+# Deploy the EC2/nginx/Let's Encrypt stack to us-east-1.
+# Required:
+#   HostedZoneId  — Route53 hosted zone ID for hoongram.com
+#   KeyPairName   — EC2 key pair name (must exist in us-east-1)
+#   HmacSecret    — shared secret; must match server_hmac_secret in client_config.json
+#   AcmeEmail     — email for Let's Encrypt cert notifications
+# Optional:
+#   GitRepoUrl    — git repo to clone on first boot (e.g. https://github.com/you/mute.git)
 #
-#   make aws-deploy HostedZoneId=ZXXXXXXXXXXXXX
+#   make aws-deploy HostedZoneId=ZXXX KeyPairName=my-key HmacSecret=... AcmeEmail=you@example.com
 
 .PHONY: aws-deploy
-aws-deploy: ## Deploy (or update) the S3/CloudFront CloudFormation stack
-	@: $${HostedZoneId:?'HostedZoneId is required: make aws-deploy HostedZoneId=ZXXX'}
+aws-deploy: ## Deploy (or update) the EC2 dashboard CloudFormation stack
+	@: $${HostedZoneId:?'HostedZoneId is required'}
+	@: $${KeyPairName:?'KeyPairName is required'}
+	@: $${HmacSecret:?'HmacSecret is required'}
+	@: $${AcmeEmail:?'AcmeEmail is required'}
 	aws cloudformation deploy \
 	  --stack-name $(STACK_NAME) \
 	  --template-file cloudformation.yml \
@@ -67,7 +76,10 @@ aws-deploy: ## Deploy (or update) the S3/CloudFront CloudFormation stack
 	  --parameter-overrides \
 	    DomainName=$(DOMAIN) \
 	    HostedZoneId=$(HostedZoneId) \
-	    $(if $(ApiKey),ApiKey=$(ApiKey),)
+	    KeyPairName=$(KeyPairName) \
+	    HmacSecret=$(HmacSecret) \
+	    AcmeEmail=$(AcmeEmail) \
+	    $(if $(GitRepoUrl),GitRepoUrl=$(GitRepoUrl),)
 	@echo ""
 	@echo "✅ Stack deployed. Outputs:"
 	@aws cloudformation describe-stacks \

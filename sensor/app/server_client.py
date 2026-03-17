@@ -74,10 +74,11 @@ def flush(config: Dict[str, Any], db_path: str) -> None:
                 event_ids = [e["id"] for e in events]
                 db_module.mark_readings_sent(db_path, reading_ids)
                 db_module.mark_events_sent(db_path, event_ids)
-                logger.debug(
-                    "Flushed %d readings and %d events to server",
+                logger.info(
+                    "[SERVER] Flushed %d readings and %d events to %s",
                     len(readings),
                     len(events),
+                    server_url,
                 )
             else:
                 logger.warning("Server returned unexpected status %s", resp.status)
