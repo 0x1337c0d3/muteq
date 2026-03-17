@@ -2,18 +2,18 @@
 Test runner for the MUTEq sensor.
 
 Simulates a real sensor by writing randomly generated SPL readings directly to
-a local SQLite database and generating the static HTML dashboard, without
-requiring a USB SPL meter.
+a local SQLite database and periodically flushing them to the dashboard server,
+without requiring a USB SPL meter.
 
 Usage (from the repo root):
     python sensor/test_runner.py
 
 Optional env vars:
-    DEVICE_NAME     Sensor display name  (default: Test Sensor)
-    INTERVAL        Seconds between readings  (default: 2)
-    DB_PATH         SQLite database path  (default: /tmp/muteq-test.db)
-    S3_BUCKET       If set, upload generated HTML to this bucket
-    AWS_REGION      AWS region for S3  (default: us-east-1)
+    DEVICE_NAME           Sensor display name  (default: Test Sensor)
+    INTERVAL              Seconds between readings  (default: 2)
+    DB_PATH               SQLite database path  (default: /tmp/muteq-test.db)
+    SERVER_URL            Dashboard server base URL  (e.g. http://localhost:8080)
+    SERVER_HMAC_SECRET    HMAC secret shared with the server
 """
 
 import logging
@@ -30,8 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from app.db import init_db, prune_old_data, write_event, write_reading
-from app.html_generator import generate_html
-from app.s3_uploader import upload_dashboard
+from app.server_client import flush as flush_to_server
 
 MINIMUM_NOISE_LEVEL = 70.0
 TIME_WINDOW_SECONDS = 2.0
@@ -39,8 +38,8 @@ TIME_WINDOW_SECONDS = 2.0
 DEVICE_NAME: str = os.environ.get("DEVICE_NAME", "Test Sensor")
 INTERVAL: float = float(os.environ.get("INTERVAL", "2"))
 DB_PATH: str = os.environ.get("DB_PATH", "/tmp/muteq-test.db")
-S3_BUCKET: str = os.environ.get("S3_BUCKET", "")
-AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
+SERVER_URL: str = os.environ.get("SERVER_URL", "")
+SERVER_HMAC_SECRET: str = os.environ.get("SERVER_HMAC_SECRET", "")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,7 +113,7 @@ def main():
         now = time.time()
         if now - last_publish >= publish_interval:
             if upload_thread and upload_thread.is_alive():
-                logger.warning("[S3] Previous upload still running, skipping this cycle.")
+                logger.warning("[SERVER] Previous flush still running, skipping this cycle.")
             else:
                 upload_thread = threading.Thread(target=_do_publish, daemon=True)
                 upload_thread.start()
@@ -128,34 +127,15 @@ def main():
 
 
 def _do_publish():
-    try:
-        html_content = generate_html(
-            db_path=DB_PATH,
-            device_name=DEVICE_NAME,
-            location="Test Location",
-            environment_profile="traffic_roadside",
-            generated_at=datetime.now(timezone.utc),
-        )
-    except Exception as exc:
-        logger.error(f"HTML generation failed: {exc}")
+    if not SERVER_URL or not SERVER_HMAC_SECRET:
+        logger.info("[SERVER] SERVER_URL/SERVER_HMAC_SECRET not set — skipping flush.")
         return
-
-    out_path = Path("/tmp/muteq-dashboard.html")
-    out_path.write_text(html_content, encoding="utf-8")
-    logger.info(f"[HTML] Dashboard written to {out_path}")
-
-    if S3_BUCKET:
-        success = upload_dashboard(
-            html_content=html_content,
-            db_path=DB_PATH,
-            bucket=S3_BUCKET,
-            aws_region=AWS_REGION,
-            aws_access_key_id=None,
-            aws_secret_access_key=None,
-            logger=logger,
-        )
-        if success:
-            logger.info(f"[S3] Uploaded to s3://{S3_BUCKET}/index.html")
+    cfg = {"server_url": SERVER_URL, "server_hmac_secret": SERVER_HMAC_SECRET}
+    try:
+        flush_to_server(cfg, DB_PATH)
+        logger.info("[SERVER] Flushed readings and events to server.")
+    except Exception as exc:
+        logger.error(f"[SERVER] Flush failed: {exc}")
 
 
 if __name__ == "__main__":

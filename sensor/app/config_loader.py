@@ -25,6 +25,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "mqtt_pass": "",
     "mqtt_tls": False,
     "log_level": "INFO",
+    "server_url": None,
+    "server_hmac_secret": None,
 }
 
 
@@ -92,8 +94,5 @@ def validate_config(cfg: Dict[str, Any], logger) -> Dict[str, Any]:
 
     if not cfg.get("db_path"):
         cfg["db_path"] = DEFAULT_CONFIG["db_path"]
-
-    if not cfg.get("s3_bucket"):
-        logger.warning("[CONFIG] s3_bucket is not set — S3 uploads will be skipped.")
 
     return cfg

@@ -12,9 +12,8 @@ from typing import Optional
 
 from .config_loader import DEFAULT_CONFIG, load_config, persist_config, validate_config
 from .db import init_db, prune_old_data, write_event, write_reading
-from .html_generator import generate_html
 from .mqtt_client import MuteqMqttClient
-from .s3_uploader import upload_dashboard
+from .server_client import flush as flush_to_server
 from .usb_reader import find_usb_device, read_spl_value
 
 CLIENT_VERSION = "0.1.0"
@@ -31,7 +30,7 @@ def setup_logging(level: str) -> logging.Logger:
 
 
 class MuteqClientApp:
-    """Sensor orchestration: reads USB SPL → SQLite → periodic S3 HTML upload."""
+    """Sensor orchestration: reads USB SPL → local SQLite buffer → periodic server flush."""
 
     def __init__(self):
         self.logger = setup_logging("INFO")
@@ -47,7 +46,7 @@ class MuteqClientApp:
         self.mqtt_client: Optional[MuteqMqttClient] = None
         self.usb_device = None
         self.db_path: str = self.cfg.get("db_path", DEFAULT_CONFIG["db_path"])
-        self._upload_thread: Optional[threading.Thread] = None
+        self._flush_thread: Optional[threading.Thread] = None
 
     def _ensure_local_device_id(self):
         """Derive a stable local device ID from device_name if not already set."""
@@ -96,38 +95,12 @@ class MuteqClientApp:
             product_id_int = None
         self.usb_device = find_usb_device(vendor_id_int, product_id_int, self.logger)
 
-    def _publish_dashboard(self):
-        """Generate static HTML from SQLite and upload to S3."""
-        location = self.cfg.get("location") or {}
+    def _flush_to_server(self):
+        """Flush buffered readings and events to the remote server."""
         try:
-            html_content = generate_html(
-                db_path=self.db_path,
-                device_name=self.cfg.get("device_name", "MUTEq Sensor"),
-                location=location.get("address") or "",
-                environment_profile=self.cfg.get("environment_profile") or "",
-                generated_at=datetime.now(timezone.utc),
-            )
+            flush_to_server(self.cfg, self.db_path)
         except Exception as exc:
-            self.logger.error(f"HTML generation failed: {exc}")
-            return
-
-        bucket = self.cfg.get("s3_bucket", "")
-        if not bucket:
-            self.logger.warning("[S3] s3_bucket not configured; skipping upload.")
-            return
-
-        success = upload_dashboard(
-            html_content=html_content,
-            db_path=self.db_path,
-            bucket=bucket,
-            aws_region=self.cfg.get("aws_region", "us-east-1"),
-            aws_access_key_id=self.cfg.get("aws_access_key_id") or None,
-            aws_secret_access_key=self.cfg.get("aws_secret_access_key") or None,
-            cloudfront_distribution_id=self.cfg.get("cloudfront_distribution_id") or None,
-            logger=self.logger,
-        )
-        if success:
-            self.logger.info(f"[S3] Dashboard uploaded to s3://{bucket}/index.html")
+            self.logger.error(f"Server flush failed: {exc}")
 
     def measurement_loop(self):
         self.logger.info("Starting measurement loop.")
@@ -167,13 +140,13 @@ class MuteqClientApp:
 
             now = time.time()
             if now - last_publish >= publish_interval:
-                if self._upload_thread and self._upload_thread.is_alive():
-                    self.logger.warning("[S3] Previous upload still running, skipping this cycle.")
+                if self._flush_thread and self._flush_thread.is_alive():
+                    self.logger.warning("[SERVER] Previous flush still running, skipping this cycle.")
                 else:
-                    self._upload_thread = threading.Thread(
-                        target=self._publish_dashboard, daemon=True
+                    self._flush_thread = threading.Thread(
+                        target=self._flush_to_server, daemon=True
                     )
-                    self._upload_thread.start()
+                    self._flush_thread.start()
                 last_publish = now
 
     def shutdown(self):

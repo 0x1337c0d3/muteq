@@ -20,7 +20,8 @@ def init_db(db_path: str) -> None:
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp   TEXT NOT NULL,
                 noise_value REAL NOT NULL,
-                peak_value  REAL
+                peak_value  REAL,
+                sent        INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (timestamp);
 
@@ -28,10 +29,17 @@ def init_db(db_path: str) -> None:
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp   TEXT NOT NULL,
                 noise_value REAL NOT NULL,
-                peak_value  REAL
+                peak_value  REAL,
+                sent        INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events (timestamp);
         """)
+        # Migrate existing databases that lack the sent column
+        for table in ("readings", "events"):
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN sent INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass  # column already exists
     finally:
         conn.close()
 
@@ -127,12 +135,71 @@ def query_daily_stats(db_path: str, since_iso: str) -> list[dict]:
         conn.close()
 
 
+def get_unsent_readings(db_path: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """Return up to `limit` readings not yet sent to the server, oldest first."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, timestamp, noise_value, peak_value FROM readings "
+            "WHERE sent=0 ORDER BY timestamp ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_unsent_events(db_path: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """Return up to `limit` events not yet sent to the server, oldest first."""
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, timestamp, noise_value, peak_value FROM events "
+            "WHERE sent=0 ORDER BY timestamp ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def mark_readings_sent(db_path: str, ids: List[int]) -> None:
+    """Mark the given reading IDs as sent."""
+    if not ids:
+        return
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            f"UPDATE readings SET sent=1 WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        )
+    finally:
+        conn.close()
+
+
+def mark_events_sent(db_path: str, ids: List[int]) -> None:
+    """Mark the given event IDs as sent."""
+    if not ids:
+        return
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            f"UPDATE events SET sent=1 WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        )
+    finally:
+        conn.close()
+
+
 def prune_old_data(db_path: str, retain_days: int = 35) -> None:
-    """Delete readings and events older than `retain_days` days."""
+    """Delete sent readings and events older than `retain_days` days.
+
+    Unsent rows are never pruned so the buffer is not lost before delivery.
+    """
     cutoff = (datetime.now(timezone.utc) - timedelta(days=retain_days)).isoformat()
     conn = _connect(db_path)
     try:
-        conn.execute("DELETE FROM readings WHERE timestamp < ?", (cutoff,))
-        conn.execute("DELETE FROM events WHERE timestamp < ?", (cutoff,))
+        conn.execute("DELETE FROM readings WHERE timestamp < ? AND sent=1", (cutoff,))
+        conn.execute("DELETE FROM events WHERE timestamp < ? AND sent=1", (cutoff,))
     finally:
         conn.close()

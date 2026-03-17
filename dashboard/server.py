@@ -5,14 +5,17 @@ Launch:
     MUTEQ_DB=/tmp/muteq-test.db uv run uvicorn dashboard.server:app --reload --port 8080
 """
 
+import hashlib
+import hmac
 import json
 import logging
 import os
 import sqlite3
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -21,6 +24,7 @@ logger = logging.getLogger(__name__)
 _HERE = Path(__file__).parent
 _CONFIG_PATH = os.environ.get("MUTEQ_CONFIG", "sensor/client_config.json")
 _DB_PATH_ENV = os.environ.get("MUTEQ_DB")
+_HMAC_SECRET = os.environ.get("MUTEQ_HMAC_SECRET", "")
 
 # ---------------------------------------------------------------------------
 # Config helpers
@@ -57,11 +61,44 @@ def _load_device_info() -> dict:
 _DB_PATH = _load_db_path()
 _DEVICE_INFO = _load_device_info()
 
+
+def _init_server_db(db_path: str) -> None:
+    """Create tables in the server's own DB if they don't exist."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS readings (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT NOT NULL,
+                noise_value REAL NOT NULL,
+                peak_value  REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (timestamp);
+
+            CREATE TABLE IF NOT EXISTS events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT NOT NULL,
+                noise_value REAL NOT NULL,
+                peak_value  REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_ts ON events (timestamp);
+        """)
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="MUTEq Dashboard", docs_url="/docs")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    _init_server_db(_DB_PATH)
+    yield
+
+
+app = FastAPI(title="MUTEq Dashboard", docs_url="/docs", lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
 # ---------------------------------------------------------------------------
@@ -300,6 +337,48 @@ async def get_stats(
         "heatmap": heatmap,
         "daily_stats": daily_stats,
     }
+
+
+@app.post("/api/ingest")
+async def ingest(request: Request):
+    """Receive a batch of readings and events from a sensor Pi.
+
+    Requires HMAC-SHA256 authentication via X-HMAC-Signature header.
+    """
+    if not _HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="Server HMAC secret not configured")
+
+    body = await request.body()
+    provided = request.headers.get("X-HMAC-Signature", "")
+    expected = "sha256=" + hmac.new(_HMAC_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, provided):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    readings = payload.get("readings") or []
+    events = payload.get("events") or []
+
+    conn = _connect()
+    try:
+        for r in readings:
+            conn.execute(
+                "INSERT INTO readings (timestamp, noise_value, peak_value) VALUES (?, ?, ?)",
+                (r["timestamp"], r["noise_value"], r["peak_value"]),
+            )
+        for e in events:
+            conn.execute(
+                "INSERT INTO events (timestamp, noise_value, peak_value) VALUES (?, ?, ?)",
+                (e["timestamp"], e["noise_value"], e["peak_value"]),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"inserted": {"readings": len(readings), "events": len(events)}}
 
 
 # ---------------------------------------------------------------------------
