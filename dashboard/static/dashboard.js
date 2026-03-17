@@ -58,6 +58,9 @@ function createChart() {
   chart = LightweightCharts.createChart(container, {
     width:  container.clientWidth,
     height: container.clientHeight,
+    localization: {
+      timeFormatter: (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    },
     layout: {
       background: { color: '#131722' },
       textColor: '#d1d4dc',
