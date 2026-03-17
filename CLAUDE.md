@@ -81,6 +81,12 @@ sudo systemctl restart muteq-sensor
 journalctl -u muteq-sensor -n 100 -f
 ```
 
+### Updating the EC2 dashboard server
+```bash
+sudo git -C /opt/muteq/app pull && sudo systemctl restart muteq-dashboard
+journalctl -u muteq-dashboard -n 100 -f
+```
+
 ## Configuration
 
 Sensor config at `sensor/client_config.json` (template) or `/var/lib/muteq-sensor/config_client.json` (live):
