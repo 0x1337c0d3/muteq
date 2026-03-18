@@ -26,8 +26,8 @@ def flush(config: Dict[str, Any], db_path: str) -> None:
     if not server_url or not secret:
         return
 
-    readings = db_module.get_unsent_readings(db_path)
-    events = db_module.get_unsent_events(db_path)
+    readings = db_module.get_unsent_readings(db_path, limit=5000)
+    events = db_module.get_unsent_events(db_path, limit=2000)
 
     if not readings and not events:
         return
