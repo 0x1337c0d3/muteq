@@ -6,16 +6,17 @@
 
 ---
 
-## 🎯 What is mute?
+## 🎯 What is MUTEq?
 
-**mute** is a self-hostable acoustic monitoring platform — no server required.
+**MUTEq** is a self-hostable acoustic monitoring platform.
 
-Connect a USB sound meter to a Raspberry Pi, and it writes SPL readings to a local SQLite database and publishes a static HTML dashboard to S3 every 60 seconds. No cloud backend, no server to maintain.
+Connect a USB sound meter to a Raspberry Pi. The sensor reads SPL every 0.1s, applies smoothing, and stores readings in a local SQLite database. Every 60 seconds it flushes new data to a FastAPI dashboard server running on EC2. The dashboard is a live-updating web app served directly by that server.
 
-- 📈 **Noise level monitoring** — readings every 0.5 seconds, written to local SQLite
-- 🌐 **Static dashboard on S3** — auto-published to `https://www.hoongram.com` via CloudFront
-- 🏠 **Local Home Assistant integration** via optional MQTT
-- ☁️ **One-command AWS deployment** — S3 + CloudFront + ACM + Route53 via CloudFormation
+- 📈 **Continuous noise monitoring** — readings every 0.1s with asymmetric EMA smoothing
+- 🌐 **Live dashboard** — FastAPI server on EC2, HTTPS via nginx + Let's Encrypt
+- 🔐 **HMAC-authenticated ingest** — sensor authenticates to the server with HMAC-SHA256
+- 🏠 **Home Assistant integration** via optional MQTT
+- ☁️ **One-command AWS deployment** — EC2 + nginx + Let's Encrypt + Route53 via CloudFormation
 - 🔧 **Full Makefile** for formatting and cloud ops
 
 ---
@@ -25,10 +26,11 @@ Connect a USB sound meter to a Raspberry Pi, and it writes SPL readings to a loc
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  🎤 USB Sound   │ ──▶ │  sensor/        │ ──▶ │  SQLite (local) │     │  📊 Dashboard   │
-│     Meter       │     │  Python / Pi    │     │  on Pi SD card  │     │  S3 + CloudFront│
-└─────────────────┘     └─────────────────┘     └─────────────────┘     └─────────────────┘
-                                │                        │  every 60s ──▶  s3://www.hoongram.com
-                                │ (optional)             │                  /index.html
+│     Meter       │     │  Python / Pi    │     │  on Pi SD card  │     │  EC2 FastAPI    │
+└─────────────────┘     └─────────────────┘     └─────────────────┘     │  + nginx/HTTPS  │
+                                │                        │  every 60s     └─────────────────┘
+                                │                        │  POST /api/ingest (HMAC-SHA256)
+                                │ (optional)             │
                                 ▼
                         ┌─────────────────┐
                         │  📡 MQTT        │
@@ -36,25 +38,40 @@ Connect a USB sound meter to a Raspberry Pi, and it writes SPL readings to a loc
                         └─────────────────┘
 ```
 
+### Data Flow
+
+1. Sensor reads USB SPL meter every **0.1s**
+2. Applies **AsymmetricEMA smoothing** (fast attack, slow decay) to each reading
+3. Writes smoothed value to local `readings` table; if raw peak ≥ 70 dB also writes to `events`
+4. Every **60s**: flushes unsent rows to the dashboard server via `POST /api/ingest` with HMAC-SHA256 auth
+5. Dashboard server stores ingested data in its own SQLite DB on EC2
+6. Browser polls `/api/readings`, `/api/events`, `/api/stats` every 30s — live mode shows a rolling 30-min window
+
 ### Project Layout
 
 ```
-mute/
+muteq/
 ├── sensor/
-│   ├── app/                # core sensor logic
-│   │   ├── main.py         # orchestration & measurement loop
-│   │   ├── db.py           # SQLite: init, write_reading, write_event, prune
-│   │   ├── html_generator.py  # static HTML dashboard generation
-│   │   ├── s3_uploader.py  # boto3 upload to S3
-│   │   ├── config_loader.py
-│   │   ├── mqtt_client.py
-│   │   └── usb_reader.py
-│   ├── client.py           # entry point
-│   ├── install.sh          # Pi setup: venv, udev, systemd service
-│   ├── test_runner.py      # simulated sensor (no USB needed)
+│   ├── app/
+│   │   ├── main.py             # orchestration & measurement loop
+│   │   ├── smoothing.py        # AsymmetricEMA (fast attack, slow decay)
+│   │   ├── db.py               # SQLite: init, write_reading, write_event, prune
+│   │   ├── server_client.py    # HMAC-SHA256 flush to /api/ingest
+│   │   ├── usb_reader.py       # pyusb wrapper for sound meters
+│   │   ├── mqtt_client.py      # optional MQTT + Home Assistant auto-discovery
+│   │   └── config_loader.py    # JSON config load/validate with defaults
+│   ├── client.py               # entry point
+│   ├── install.sh              # Pi setup: venv, udev rule, systemd service
+│   ├── test_runner.py          # simulated sensor (no USB needed)
 │   └── requirements.txt
-├── cloudformation.yml      # S3 + CloudFront + ACM + Route53
-└── Makefile                # fmt, lint, aws-deploy, aws-delete
+├── dashboard/
+│   ├── server.py               # FastAPI: /api/readings, /api/events, /api/stats, /api/ingest
+│   └── static/
+│       ├── index.html          # single-page app (TradingView Lightweight Charts)
+│       ├── dashboard.js
+│       └── dashboard.css
+├── cloudformation.yml          # EC2 + nginx + Let's Encrypt + Elastic IP + Route53
+└── Makefile                    # fmt, lint, aws-deploy, aws-delete
 ```
 
 ---
@@ -75,32 +92,63 @@ mute/
 2. ✅ A Raspberry Pi 3 or any Linux device
 3. ✅ Python 3.11+
 4. ✅ An AWS account with a Route53 hosted zone for your domain
+5. ✅ An EC2 key pair in `us-east-1`
 
 ---
 
-## ☁️ Step 1 — Deploy the AWS infrastructure
+## ☁️ Step 1 — Deploy the Dashboard Server (EC2)
 
-This creates the S3 bucket, CloudFront distribution, ACM TLS certificate, and Route53 DNS record. Run once from your dev machine (must deploy to `us-east-1`):
+This creates a t4g.micro EC2 instance (Graviton ARM64) running Amazon Linux 2023, with nginx as a reverse proxy and a Let's Encrypt TLS certificate issued via Route53 DNS-01 challenge. It also creates an Elastic IP and a Route53 A record.
+
+Run once from your dev machine (**must deploy to `us-east-1`**):
 
 ```bash
-git clone https://github.com/you/mute.git && cd mute
-make aws-deploy HostedZoneId=Z02362723Q3704KGHR8UQ
+git clone https://github.com/0x1337c0d3/muteq.git && cd muteq
+
+# Generate a shared HMAC secret (save this — you'll need it for the sensor too)
+python3 -c "import secrets; print(secrets.token_hex(32))"
+
+make aws-deploy \
+  HostedZoneId=Z02362723Q3704KGHR8UQ \
+  KeyPairName=my-key \
+  HmacSecret=<secret-from-above> \
+  AcmeEmail=you@example.com \
+  GitRepoUrl=https://github.com/0x1337c0d3/muteq.git
 ```
 
 This will:
-- 🪣 Create an S3 bucket (`www.hoongram.com`) with static website hosting
-- 🔒 Issue a TLS certificate via ACM with automatic DNS validation (takes ~5–30 min)
-- 🌐 Create a CloudFront distribution serving `https://www.hoongram.com`
-- 🗺️ Create a Route53 A record pointing to CloudFront
+- 🖥️ Launch a `t4g.micro` EC2 instance (Graviton ARM64, Amazon Linux 2023)
+- 🔒 Issue a TLS certificate via Let's Encrypt (DNS-01 via Route53) — HTTPS only
+- 🌐 Configure nginx to proxy `https://www.hoongram.com` → FastAPI on `127.0.0.1:8080`
+- 🗺️ Create a Route53 A record pointing to the Elastic IP
+- 🚀 Clone the repo and start the `muteq-dashboard` systemd service automatically
 
 See [`cloudformation.yml`](cloudformation.yml) for the full stack definition.
 
----
-
-## 🎤 Step 2 — Install the sensor on your Pi
+### First-boot progress
 
 ```bash
-git clonehttps://github.com/0x1337c0d3/muteq.git && cd mute
+make aws-status   # show stack status and outputs (ElasticIP, SSHCommand, etc.)
+
+# SSH in and watch the setup log:
+ssh ec2-user@<ElasticIP>
+sudo tail -f /var/log/muteq-setup.log
+```
+
+### Updating the EC2 server
+
+```bash
+ssh ec2-user@<ElasticIP>
+sudo git -C /opt/muteq/app pull && sudo systemctl restart muteq-dashboard
+journalctl -u muteq-dashboard -n 100 -f
+```
+
+---
+
+## 🎤 Step 2 — Install the Sensor on Your Pi
+
+```bash
+git clone https://github.com/0x1337c0d3/muteq.git && cd muteq
 ./sensor/install.sh
 ```
 
@@ -110,10 +158,8 @@ Then edit `/var/lib/muteq-sensor/config_client.json`:
 {
   "device_name": "My Sensor",
   "location": { "address": "123 Main St" },
-  "s3_bucket": "www.hoongram.com",
-  "aws_region": "us-east-1",
-  "aws_access_key_id": "AKIA...",
-  "aws_secret_access_key": "..."
+  "server_url": "https://www.hoongram.com",
+  "server_hmac_secret": "<same-secret-used-in-aws-deploy>"
 }
 ```
 
@@ -121,30 +167,27 @@ Restart the service:
 
 ```bash
 sudo systemctl restart muteq-sensor
-journalctl -u muteq-sensor -f   # confirm "[S3] Dashboard uploaded"
+journalctl -u muteq-sensor -f   # confirm "Flushed N readings to server"
 ```
 
-The Pi IAM user only needs one permission:
-
-```json
-{ "Effect": "Allow", "Action": "s3:PutObject",
-  "Resource": "arn:aws:s3:::www.hoongram.com/index.html" }
-```
+The sensor requires **no AWS credentials** — it authenticates to the dashboard server with the shared HMAC secret only.
 
 ### Test without a USB meter
 
-Writes simulated SPL readings to SQLite and generates HTML locally:
-
 ```bash
-python sensor/test_runner.py
-# open /tmp/muteq-dashboard.html in your browser
+# Terminal 1 — simulated sensor writing to /tmp/muteq-test.db
+uv run python sensor/test_runner.py
+
+# Terminal 2 — dashboard server reading the same DB directly
+MUTEQ_DB=/tmp/muteq-test.db uv run uvicorn dashboard.server:app --reload --port 8080
+# open http://localhost:8080
 ```
 
 ---
 
 ## 🏠 Optional: Home Assistant Integration (MQTT)
 
-Set the MQTT fields in `config_client.json` (or pass as environment variables):
+Set the MQTT fields in `config_client.json`:
 
 ```json
 {
@@ -155,33 +198,6 @@ Set the MQTT fields in `config_client.json` (or pass as environment variables):
   "mqtt_pass": "mqtt-pass"
 }
 ```
-
-Or via environment variables (prefix `LOCAL_MQTT_`):
-
-```bash
-LOCAL_MQTT_ENABLED=true LOCAL_MQTT_SERVER=192.168.1.100 python sensor/client.py
-```
-
-> 💡 **Note:** MQTT is completely optional. Your Mute Box works perfectly fine without it — the S3 dashboard is always the primary output.
-
-### Environment Variables (All Optional)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `LOCAL_MQTT_ENABLED` | `false` | Enable MQTT publishing for Home Assistant |
-| `LOCAL_MQTT_SERVER` | — | MQTT broker IP address |
-| `LOCAL_MQTT_PORT` | `1883` | MQTT broker port |
-| `LOCAL_MQTT_USER` | — | MQTT username |
-| `LOCAL_MQTT_PASS` | — | MQTT password |
-| `LOCAL_MQTT_TLS` | `false` | Enable TLS for MQTT connection |
-
-> 🚫 **No other configuration is needed.** There are no API keys, no tokens, no manual device IDs. Everything is automatic.
-
----
-
-## 🏠 Home Assistant Integration
-
-mute supports **MQTT auto-discovery** for seamless Home Assistant integration. When MQTT is configured, your sensor will automatically appear in Home Assistant!
 
 ### MQTT Topics
 
@@ -198,12 +214,12 @@ automation:
   - alias: "Alert when noise exceeds 85 dB"
     trigger:
       - platform: numeric_state
-        entity_id: sensor.mute_box_noise_level
+        entity_id: sensor.muteq_noise_level
         above: 85
     action:
       - service: notify.mobile_app
         data:
-          message: "⚠️ Noise level is {{ states('sensor.mute_box_noise_level') }} dB!"
+          message: "⚠️ Noise level is {{ states('sensor.muteq_noise_level') }} dB!"
 ```
 
 ---
@@ -221,14 +237,64 @@ automation:
 
 ## 📊 Dashboard Features
 
-The static dashboard at [www.hoongram.com](https://www.hoongram.com) regenerates every 60 seconds:
+The live dashboard at [www.hoongram.com](https://www.hoongram.com) updates every 30 seconds via browser polling:
 
-- 📈 **Latest SPL** — Most recent reading with color coding (green/yellow/red)
+- 📈 **Latest SPL** — Most recent smoothed reading with color coding (green/yellow/red)
 - 🔴 **Peak (1 h)** — Highest reading in the last hour
-- 📉 **Threshold events** — Count of readings ≥ 80 dB
-- 📊 **SPL chart** — Chart.js line chart with 1h / 1d / 1w / 1m timeframes (instant switching, all data embedded)
-- 📋 **Events table** — List of threshold breaches for the selected timeframe
-- 🔄 **Auto-refresh** — Page reloads every 60 seconds via `<meta http-equiv="refresh">`
+- 📉 **Threshold events** — Count of raw peaks ≥ 70 dB
+- 📊 **SPL chart** — TradingView Lightweight Charts with scroll-back history loaded on demand
+- 🔴 **Live mode** — Rolling 30-minute window with real-time updates
+- 📋 **Events table** — List of threshold breaches
+
+---
+
+## ⚙️ Configuration
+
+### Sensor (`/var/lib/muteq-sensor/config_client.json`)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `device_name` | `"MUTEq Sensor"` | Display name on the dashboard |
+| `location.address` | `""` | Shown in dashboard header |
+| `environment_profile` | `"traffic_roadside"` | Noise context label |
+| `db_path` | `/var/lib/muteq-sensor/muteq.db` | Local SQLite path |
+| `publish_interval_seconds` | `60` | How often to flush readings to the server |
+| `server_url` | `null` | Dashboard server base URL (e.g. `https://www.hoongram.com`) |
+| `server_hmac_secret` | `null` | Shared HMAC secret — must match `HmacSecret` on the server |
+| `mqtt_enabled` | `false` | Enable optional Home Assistant MQTT |
+| `mqtt_realtime_interval_seconds` | `5` | How often to publish the smoothed SPL to MQTT |
+
+### Dashboard Server (environment variables on EC2)
+
+| Variable | Description |
+|----------|-------------|
+| `MUTEQ_DB` | Path to SQLite DB (defaults to `/var/lib/muteq-dashboard/muteq.db`) |
+| `MUTEQ_HMAC_SECRET` | Must match `server_hmac_secret` in sensor config |
+| `MUTEQ_CONFIG` | Path to sensor config file (default: `sensor/client_config.json`) |
+
+---
+
+## 🛠️ Development
+
+Install dev dependencies:
+
+```bash
+make install   # uv sync --group dev
+```
+
+All common tasks are available via `make`:
+
+```
+make fmt             # auto-format + sort imports with ruff
+make lint            # lint check (no auto-fix)
+make fmt-check       # CI-safe format check
+make clean           # remove __pycache__, .pyc, .ruff_cache, etc.
+make dashboard       # run dashboard server locally at http://localhost:8080
+
+make aws-deploy HostedZoneId=ZXXX KeyPairName=my-key HmacSecret=... AcmeEmail=you@example.com
+make aws-status      # show stack status and outputs
+make aws-delete      # tear down the stack (prompts for confirmation)
+```
 
 ---
 
@@ -267,52 +333,6 @@ The static dashboard at [www.hoongram.com](https://www.hoongram.com) regenerates
 
 ---
 
-## 🔧 Build Your Own Mute Box
-
-<div align="center">
-
-### 100% Open Source · Self-Hostable · Works Instantly
-
-Building your own Mute Box is easy and affordable. All you need is:
-
-- A Raspberry Pi 3 or newer (or any Linux device)
-- A supported USB sound meter
-- Python 3.11+ or Docker
-
-</div>
-
----
-
-## 🛠️ Development
-
-All common tasks are available via `make`:
-
-```
-make fmt             # auto-format + sort imports with ruff
-make lint            # lint check (no auto-fix)
-make fmt-check       # CI-safe format check
-make clean           # remove __pycache__, .pyc, .ruff_cache, etc.
-make aws-deploy HostedZoneId=ZXXX   # deploy / update CloudFormation stack (us-east-1)
-make aws-status      # show stack status and outputs
-make aws-delete      # tear down the stack (prompts for confirmation)
-```
-
-Local test (no USB, no AWS needed):
-
-```bash
-python sensor/test_runner.py
-# reads: /tmp/muteq-test.db
-# output: /tmp/muteq-dashboard.html
-```
-
-Install dev dependencies (just `ruff`):
-
-```bash
-pip install -r requirements-dev.txt
-```
-
----
-
 ## 🔒 Privacy First
 
 | | |
@@ -320,7 +340,7 @@ pip install -r requirements-dev.txt
 | 🚫🎤 **No Audio Recordings** | Only dB levels are captured. Never actual sound content. |
 | 👤 **No Personal Data** | No PII collected. Anonymous by design. |
 | 🇪🇺 **GDPR Compliant** | Built in Europe with privacy at its core. |
-| 🔐 **Local-first** | All data stays on the Pi. Only the static HTML is uploaded to S3. |
+| 🔐 **Local-first** | All raw data stays on the Pi. Only aggregated readings are sent to the server. |
 
 ---
 
@@ -332,14 +352,13 @@ We love contributions from the community! Here's how you can help:
 - 💡 **Suggest features** — Have an idea? We're all ears.
 - 🎤 **Add USB devices** — Help us support more sound meters.
 - 📖 **Improve docs** — Documentation PRs are always welcome.
-- 🌍 **Translations** — Help make mute accessible worldwide.
-
+- 🌍 **Translations** — Help make MUTEq accessible worldwide.
 
 ---
 
 ## 🙏 Acknowledgements
 
-Based on an idea by **Raphaël Vael** witih ❤️
+Based on an idea by **Raphaël Vael** with ❤️
 
 This project is based on the original work by **silkyclouds**:
 [github.com/silkyclouds/mute](https://github.com/silkyclouds/mute)
@@ -370,6 +389,7 @@ Open-source · Community-powered · Privacy-first
 
 <p>
   <a href="https://www.hoongram.com">Dashboard</a> •
+  <a href="https://github.com/0x1337c0d3/muteq/issues">Issues</a>
 </p>
 
 </div>
