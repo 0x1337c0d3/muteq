@@ -23,8 +23,8 @@ uv run python sensor/test_runner.py
 MUTEQ_DB=/tmp/muteq-test.db uv run uvicorn dashboard.server:app --reload --port 8080
 #   dashboard server reading the test DB directly — open http://localhost:8080
 
-# AWS — deploy S3/CloudFront/ACM stack (must run in us-east-1)
-make aws-deploy HostedZoneId=Z02362723Q3704KGHR8UQ    # deploy or update CloudFormation stack
+# AWS — deploy EC2/nginx/Let's Encrypt stack (must run in us-east-1)
+make aws-deploy HostedZoneId=ZXXX KeyPairName=my-key HmacSecret=... AcmeEmail=you@example.com
 make aws-status                       # show stack status and outputs
 make aws-delete                       # tear down stack (prompts for confirmation)
 ```
