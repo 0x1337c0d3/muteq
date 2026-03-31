@@ -4,19 +4,12 @@ from copy import deepcopy
 from typing import Any, Dict
 
 DEFAULT_CONFIG: Dict[str, Any] = {
-    "config_version": 3,
     "device_name": "MUTEq Sensor",
     "local_device_id": None,
-    "location": {"address": "", "lat": None, "lon": None, "country": ""},
+    "location": {"address": ""},
     "environment_profile": "traffic_roadside",
-    "custom_environment_label": "",
     "db_path": "/var/lib/muteq-sensor/muteq.db",
     "publish_interval_seconds": 60,
-    "s3_bucket": "",
-    "aws_region": "us-east-1",
-    "aws_access_key_id": None,
-    "aws_secret_access_key": None,
-    "cloudfront_distribution_id": None,
     "usb_override": {"vendor_id": None, "product_id": None},
     "mqtt_enabled": False,
     "mqtt_server": "",
