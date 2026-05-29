@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 def _connect(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path, isolation_level=None)
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -191,15 +191,15 @@ def mark_events_sent(db_path: str, ids: List[int]) -> None:
         conn.close()
 
 
-def prune_old_data(db_path: str, retain_days: int = 35) -> None:
-    """Delete sent readings and events older than `retain_days` days.
-
-    Unsent rows are never pruned so the buffer is not lost before delivery.
-    """
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=retain_days)).isoformat()
+def prune_old_data(db_path: str, retain_days: int = 35, unsent_retain_days: int = 7) -> None:
+    """Delete readings and events older than retain_days (sent) or unsent_retain_days (unsent)."""
+    cutoff_sent = (datetime.now(timezone.utc) - timedelta(days=retain_days)).isoformat()
+    cutoff_unsent = (datetime.now(timezone.utc) - timedelta(days=unsent_retain_days)).isoformat()
     conn = _connect(db_path)
     try:
-        conn.execute("DELETE FROM readings WHERE timestamp < ? AND sent=1", (cutoff,))
-        conn.execute("DELETE FROM events WHERE timestamp < ? AND sent=1", (cutoff,))
+        conn.execute("DELETE FROM readings WHERE timestamp < ? AND sent=1", (cutoff_sent,))
+        conn.execute("DELETE FROM events WHERE timestamp < ? AND sent=1", (cutoff_sent,))
+        conn.execute("DELETE FROM readings WHERE timestamp < ? AND sent=0", (cutoff_unsent,))
+        conn.execute("DELETE FROM events WHERE timestamp < ? AND sent=0", (cutoff_unsent,))
     finally:
         conn.close()
