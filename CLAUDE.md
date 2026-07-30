@@ -23,10 +23,34 @@ uv run python sensor/test_runner.py
 MUTEQ_DB=/tmp/muteq-test.db uv run uvicorn dashboard.server:app --reload --port 8080
 #   dashboard server reading the test DB directly — open http://localhost:8080
 
-# AWS — deploy EC2/nginx/Let's Encrypt stack (must run in us-east-1)
+# AWS Dashboard — deploy EC2/nginx/Let's Encrypt stack (must run in us-east-1)
 make aws-deploy HostedZoneId=ZXXX KeyPairName=my-key HmacSecret=... AcmeEmail=you@example.com
 make aws-status                       # show stack status and outputs
 make aws-delete                       # tear down stack (prompts for confirmation)
+
+# AWS vLLM (g4dn.12xlarge test) — deploy GPU EC2 with vLLM + DeepSeek-V4-Flash
+# Uses vllm.hoongram.com, hoongram.com hosted zone, and defaults to g4dn.12xlarge / 256GB volume
+aws cloudformation create-stack \
+  --stack-name vllm-test \
+  --template-body file://cloudformation-vllm.yml \
+  --parameters \
+    ParameterKey=KeyPairName,ParameterValue=my-key \
+    ParameterKey=AcmeEmail,ParameterValue=onereddogmedia@gmail.com
+
+aws cloudformation describe-stacks --stack-name vllm-test
+aws cloudformation delete-stack --stack-name vllm-test
+
+# AWS Ollama (alternative) — deploy GPU EC2 with Ollama + deepseek (must run in us-east-1)
+aws cloudformation create-stack \
+  --stack-name ollama-server \
+  --template-body file://cloudformation-ollama.yml \
+  --parameters \
+    ParameterKey=DomainName,ParameterValue=ollama.example.com \
+    ParameterKey=HostedZoneId,ParameterValue=ZXXX \
+    ParameterKey=KeyPairName,ParameterValue=my-key \
+    ParameterKey=AcmeEmail,ParameterValue=you@example.com
+aws cloudformation describe-stacks --stack-name ollama-server
+aws cloudformation delete-stack --stack-name ollama-server
 ```
 
 ## Architecture
@@ -58,12 +82,33 @@ Both the sensor DB (local, on Pi) and the dashboard server DB share the same cor
 
 For local testing, `MUTEQ_DB=/tmp/muteq-test.db` points the dashboard server at the sensor's DB directly — no ingest needed; the extra `sent` column is ignored by the server's queries.
 
-### AWS Infrastructure (`cloudformation.yml`)
+### AWS Infrastructure
+
+#### Dashboard (`cloudformation.yml`)
 Deploy to **us-east-1** (required for CloudFront ACM certs):
 - S3 bucket (`www.hoongram.com`) with static website hosting + public read policy
 - ACM certificate with DNS validation via Route53
 - CloudFront distribution with `CachingDisabled` managed policy + HTTPS redirect
 - Route53 A alias record → CloudFront
+
+#### vLLM LLM Server (`cloudformation-vllm.yml`) — Recommended
+Deploy to **us-east-1** with GPU instance:
+- EC2 GPU instance (g4dn.xlarge / g4dn.2xlarge / g5.xlarge, etc)
+- NVIDIA drivers + CUDA toolkit
+- vLLM with Python virtual environment
+- Direct HuggingFace model download (e.g. `deepseek-ai/DeepSeek-V4-Flash`)
+- OpenAI-compatible `/v1` API endpoint
+- nginx reverse proxy with HTTPS (Let's Encrypt via Route53)
+- Multi-GPU support via tensor parallelism (for g4dn.12xlarge, etc)
+
+#### Ollama LLM Server (`cloudformation-ollama.yml`) — Alternative
+Deploy to **us-east-1** with GPU instance:
+- EC2 GPU instance (g4dn.xlarge / g4dn.2xlarge / g5.xlarge, etc)
+- NVIDIA drivers + CUDA runtime for GPU acceleration
+- Docker running Ollama container with model (`deepseek-v2.5:latest` or other)
+- nginx reverse proxy with HTTPS (Let's Encrypt via Route53)
+- Ollama API exposed on port 11434 (local) and via HTTPS (proxied)
+- Note: DeepSeek-V4-Flash not yet in Ollama registry; requires GGUF quantization
 
 ### Deployment (Pi — first time)
 ```bash

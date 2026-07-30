@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 def _connect(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path, isolation_level=None, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -24,6 +25,7 @@ def init_db(db_path: str) -> None:
                 sent        INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_readings_sent_ts ON readings (sent, timestamp);
 
             CREATE TABLE IF NOT EXISTS events (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,6 +35,7 @@ def init_db(db_path: str) -> None:
                 sent        INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_events_ts ON events (timestamp);
+            CREATE INDEX IF NOT EXISTS idx_events_sent_ts ON events (sent, timestamp);
         """)
         # Migrate existing databases that lack the sent column
         for table in ("readings", "events"):
@@ -191,7 +194,7 @@ def mark_events_sent(db_path: str, ids: List[int]) -> None:
         conn.close()
 
 
-def prune_old_data(db_path: str, retain_days: int = 35, unsent_retain_days: int = 7) -> None:
+def prune_old_data(db_path: str, retain_days: int = 3, unsent_retain_days: int = 14) -> None:
     """Delete readings and events older than retain_days (sent) or unsent_retain_days (unsent)."""
     cutoff_sent = (datetime.now(timezone.utc) - timedelta(days=retain_days)).isoformat()
     cutoff_unsent = (datetime.now(timezone.utc) - timedelta(days=unsent_retain_days)).isoformat()
