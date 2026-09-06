@@ -26,63 +26,68 @@ def flush(config: Dict[str, Any], db_path: str) -> None:
     if not server_url or not secret:
         return
 
-    readings = db_module.get_unsent_readings(db_path, limit=5000)
-    events = db_module.get_unsent_events(db_path, limit=2000)
+    # Loop up to 10 times to catch up on backlogged data
+    for _ in range(10):
+        readings = db_module.get_unsent_readings(db_path, limit=5000)
+        events = db_module.get_unsent_events(db_path, limit=2000)
 
-    if not readings and not events:
-        return
+        if not readings and not events:
+            break
 
-    device_id = config.get("local_device_id", "")
-    payload = {
-        "device_id": device_id,
-        "readings": [
-            {
-                "timestamp": r["timestamp"],
-                "noise_value": r["noise_value"],
-                "peak_value": r["peak_value"],
-            }
-            for r in readings
-        ],
-        "events": [
-            {
-                "timestamp": e["timestamp"],
-                "noise_value": e["noise_value"],
-                "peak_value": e["peak_value"],
-            }
-            for e in events
-        ],
-    }
+        device_id = config.get("local_device_id", "")
+        payload = {
+            "device_id": device_id,
+            "readings": [
+                {
+                    "timestamp": r["timestamp"],
+                    "noise_value": r["noise_value"],
+                    "peak_value": r["peak_value"],
+                }
+                for r in readings
+            ],
+            "events": [
+                {
+                    "timestamp": e["timestamp"],
+                    "noise_value": e["noise_value"],
+                    "peak_value": e["peak_value"],
+                }
+                for e in events
+            ],
+        }
 
-    body = json.dumps(payload).encode()
-    signature = _sign(secret, body)
+        body = json.dumps(payload).encode()
+        signature = _sign(secret, body)
 
-    url = server_url.rstrip("/") + "/api/ingest"
-    req = urllib.request.Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "X-HMAC-Signature": f"sha256={signature}",
-        },
-    )
+        url = server_url.rstrip("/") + "/api/ingest"
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "X-HMAC-Signature": f"sha256={signature}",
+            },
+        )
 
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                reading_ids = [r["id"] for r in readings]
-                event_ids = [e["id"] for e in events]
-                db_module.mark_readings_sent(db_path, reading_ids)
-                db_module.mark_events_sent(db_path, event_ids)
-                logger.info(
-                    "[SERVER] Flushed %d readings and %d events to %s",
-                    len(readings),
-                    len(events),
-                    server_url,
-                )
-            else:
-                logger.warning("Server returned unexpected status %s", resp.status)
-    except urllib.error.HTTPError as e:
-        logger.warning("Server ingest failed: HTTP %s", e.code)
-    except Exception as e:
-        logger.warning("Server ingest failed: %s", e)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    reading_ids = [r["id"] for r in readings]
+                    event_ids = [e["id"] for e in events]
+                    db_module.mark_readings_sent(db_path, reading_ids)
+                    db_module.mark_events_sent(db_path, event_ids)
+                    logger.info(
+                        "[SERVER] Flushed %d readings and %d events to %s",
+                        len(readings),
+                        len(events),
+                        server_url,
+                    )
+                else:
+                    logger.warning("Server returned unexpected status %s", resp.status)
+                    break # stop looping on error
+        except urllib.error.HTTPError as e:
+            logger.warning("Server ingest failed: HTTP %s", e.code)
+            break
+        except Exception as e:
+            logger.warning("Server ingest failed: %s", e)
+            break
