@@ -128,11 +128,6 @@ class MuteqClientApp:
             smoothed = self._ema.update(current_peak)
             ts = datetime.now(timezone.utc).isoformat()
             write_reading(self.db_path, ts, smoothed, smoothed)
-            print(
-                f"\n{datetime.now().strftime('%H:%M:%S')}  {current_peak:5.1f} dB  (smoothed {smoothed:5.1f})",
-                end="",
-                flush=True,
-            )
 
             if self.mqtt_client:
                 mqtt_realtime_interval = float(self.cfg.get("mqtt_realtime_interval_seconds", 5))
